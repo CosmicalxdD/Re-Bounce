@@ -2142,6 +2142,24 @@ func _draw_characters_modal() -> void:
 		draw_string_outline(font, Vector2(s_act.position.x, s_act.position.y + 33), label_str, HORIZONTAL_ALIGNMENT_CENTER, s_act.size.x, 16, 4, Color.BLACK)
 		draw_string(font, Vector2(s_act.position.x, s_act.position.y + 33), label_str, HORIZONTAL_ALIGNMENT_CENTER, s_act.size.x, 16, Color("41f3ff"))
 
+func _draw_wrapped_text(font: Font, text: String, start_pos: Vector2, max_w: float, font_size: int, col: Color) -> void:
+	var words := text.split(" ")
+	var cur_line := ""
+	var line_y: float = start_pos.y
+	var line_spacing: float = font_size + 4.0
+
+	for w in words:
+		var test_line: String = cur_line + (" " if cur_line != "" else "") + w
+		var sz: Vector2 = font.get_string_size(test_line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
+		if sz.x > max_w and cur_line != "":
+			draw_string(font, Vector2(start_pos.x, line_y), cur_line, HORIZONTAL_ALIGNMENT_LEFT, max_w, font_size, col)
+			cur_line = w
+			line_y += line_spacing
+		else:
+			cur_line = test_line
+	if cur_line != "":
+		draw_string(font, Vector2(start_pos.x, line_y), cur_line, HORIZONTAL_ALIGNMENT_LEFT, max_w, font_size, col)
+
 func _draw_boss_warning(timer: float) -> void:
 	var font := ThemeDB.fallback_font
 	var pulse: float = sin((3.8 - timer) * 11.0) * 0.5 + 0.5
