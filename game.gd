@@ -103,6 +103,8 @@ var spawn_timer: float = 0.0
 # --- Menu & UI ---
 var credits_open: bool = false
 var characters_open: bool = false
+var viewing_character: Character = Character.BANDIT
+var boss_warning_timer: float = 0.0
 
 var start_btn_rect := Rect2(470, 305, 340, 66)
 var characters_btn_rect := Rect2(470, 388, 340, 66)
@@ -112,13 +114,14 @@ var credits_box_rect := Rect2(350, 180, 580, 370)
 var close_credits_center := Vector2(895, 215)
 const CLOSE_BTN_RADIUS := 20.0
 
-var char_box_rect := Rect2(70, 55, 1140, 610)
-var close_char_center := Vector2(1170, 95)
-var char_card_rects: Array[Rect2] = [
-	Rect2(95, 140, 330, 480),
-	Rect2(475, 140, 330, 480),
-	Rect2(855, 140, 330, 480)
+var char_box_rect := Rect2(60, 35, 1160, 650)
+var close_char_center := Vector2(1185, 62)
+var char_tab_rects: Array[Rect2] = [
+	Rect2(80, 86, 360, 48),
+	Rect2(460, 86, 360, 48),
+	Rect2(840, 86, 360, 48)
 ]
+var char_activate_btn_rect := Rect2(556, 566, 628, 54)
 
 var btn_scales := {
 	"start": 1.0,
@@ -126,9 +129,10 @@ var btn_scales := {
 	"credits": 1.0,
 	"close": 1.0,
 	"char_close": 1.0,
-	"card_0": 1.0,
-	"card_1": 1.0,
-	"card_2": 1.0
+	"tab_0": 1.0,
+	"tab_1": 1.0,
+	"tab_2": 1.0,
+	"char_activate": 1.0
 }
 var btn_vel := {
 	"start": 0.0,
@@ -136,9 +140,10 @@ var btn_vel := {
 	"credits": 0.0,
 	"close": 0.0,
 	"char_close": 0.0,
-	"card_0": 0.0,
-	"card_1": 0.0,
-	"card_2": 0.0
+	"tab_0": 0.0,
+	"tab_1": 0.0,
+	"tab_2": 0.0,
+	"char_activate": 0.0
 }
 var btn_hovered := {
 	"start": false,
@@ -146,9 +151,10 @@ var btn_hovered := {
 	"credits": false,
 	"close": false,
 	"char_close": false,
-	"card_0": false,
-	"card_1": false,
-	"card_2": false
+	"tab_0": false,
+	"tab_1": false,
+	"tab_2": false,
+	"char_activate": false
 }
 
 # --- Procedural Audio (Chiptune Synth + SFX) ---
@@ -376,18 +382,23 @@ func _input(event: InputEvent) -> void:
 					_play_sfx(520.0, 260.0, 0.1, 0)
 				else:
 					for idx in range(3):
-						if char_card_rects[idx].has_point(mpos):
-							selected_character = idx as Character
-							btn_vel["card_%d" % idx] = 5.5
-							_play_sfx(540.0, 920.0, 0.14, 0)
-							_spawn_burst(char_card_rects[idx].get_center(), Color("41f3ff"), 14, 160.0)
+						if char_tab_rects[idx].has_point(mpos):
+							viewing_character = idx as Character
+							btn_vel["tab_%d" % idx] = 5.0
+							_play_sfx(540.0, 780.0, 0.12, 0)
 							break
+					if char_activate_btn_rect.has_point(mpos):
+						selected_character = viewing_character
+						btn_vel["char_activate"] = 6.0
+						_play_sfx(540.0, 960.0, 0.18, 0)
+						_spawn_burst(char_activate_btn_rect.get_center(), Color("41f3ff"), 24, 200.0)
 			else:
 				if start_btn_rect.has_point(mpos):
 					_play_sfx(440.0, 880.0, 0.18, 0)
 					_begin_game_from_wave_1()
 				elif characters_btn_rect.has_point(mpos):
 					characters_open = true
+					viewing_character = selected_character
 					btn_vel["characters"] = 6.5
 					_play_sfx(440.0, 720.0, 0.14, 0)
 				elif credits_btn_rect.has_point(mpos):
@@ -405,7 +416,22 @@ func _input(event: InputEvent) -> void:
 				_play_sfx(520.0, 320.0, 0.14, 0)
 
 	if event is InputEventKey and event.pressed and not event.echo:
-		if state == State.PLAYING:
+		if state == State.MENU and characters_open:
+			if event.keycode in [KEY_LEFT, KEY_A]:
+				viewing_character = (int(viewing_character) + 2) % 3 as Character
+				_play_sfx(540.0, 780.0, 0.1, 0)
+			elif event.keycode in [KEY_RIGHT, KEY_D]:
+				viewing_character = (int(viewing_character) + 1) % 3 as Character
+				_play_sfx(540.0, 780.0, 0.1, 0)
+			elif event.keycode in [KEY_ENTER, KEY_SPACE]:
+				selected_character = viewing_character
+				btn_vel["char_activate"] = 6.0
+				_play_sfx(540.0, 960.0, 0.18, 0)
+				_spawn_burst(char_activate_btn_rect.get_center(), Color("41f3ff"), 24, 200.0)
+			elif event.keycode == KEY_ESCAPE:
+				characters_open = false
+				_play_sfx(520.0, 260.0, 0.1, 0)
+		elif state == State.PLAYING:
 			if event.keycode == KEY_F:
 				_attempt_parry()
 			elif event.keycode in [KEY_SPACE, KEY_W, KEY_UP]:
@@ -519,8 +545,9 @@ func _setup_wave_entities(wave_num: int) -> void:
 			"laser_speed": 660.0
 		}
 		mobs.append(boss)
-		screen_shake = 16.0
-		_play_sfx(180.0, 80.0, 0.65, 1)
+		screen_shake = 24.0
+		boss_warning_timer = 3.8
+		_play_sfx(140.0, 60.0, 0.85, 1)
 		_add_floating_text("EXTREME BOSS INCOMING!", Vector2(VIEW_W * 0.5, 120.0), Color("ff2a4b"))
 	else:
 		mobs_to_spawn = 3 + wave_num * 2
@@ -535,6 +562,14 @@ func _physics_process(delta: float) -> void:
 	_update_menu_buttons(delta)
 	screen_shake = maxf(0.0, screen_shake - delta * 28.0)
 	grief_pulse_flash = maxf(0.0, grief_pulse_flash - delta * 1.8)
+
+	if boss_warning_timer > 0.0:
+		boss_warning_timer = maxf(0.0, boss_warning_timer - delta)
+		if fmod(boss_warning_timer, 0.65) < delta and boss_warning_timer > 0.4:
+			_play_sfx(440.0, 180.0, 0.22, 1)
+			screen_shake = maxf(screen_shake, 12.0)
+			_spawn_burst(Vector2(randf_range(200.0, VIEW_W - 200.0), 38.0), Color("ff2a4b"), 8, 200.0)
+			_spawn_burst(Vector2(randf_range(200.0, VIEW_W - 200.0), VIEW_H - 38.0), Color("ff2a4b"), 8, 200.0)
 
 	match state:
 		State.MENU:
@@ -622,14 +657,13 @@ func _update_menu_buttons(delta: float) -> void:
 	_apply_spring_button("close", hover_close, delta)
 	_apply_spring_button("char_close", hover_char_close, delta)
 
-	# Character cards spring animation: selected card stays enlarged!
-	for idx in range(3):
-		var key := "card_%d" % idx
-		var is_card_hovered := (state == State.MENU) and characters_open and char_card_rects[idx].has_point(mpos)
-		var is_chosen: bool = (selected_character == (idx as Character))
-		# Target scale: chosen card is 1.10 (enlarged!), unchosen is 0.94, hover gets slight boost
-		var target_scale: float = 1.10 if is_chosen else (0.98 if is_card_hovered else 0.94)
-		_apply_spring_card(key, is_card_hovered, target_scale, delta)
+	# Character selection tabs and activate button spring animations
+	if state == State.MENU and characters_open:
+		for idx in range(3):
+			var hover_tab: bool = char_tab_rects[idx].has_point(mpos)
+			_apply_spring_button("tab_%d" % idx, hover_tab, delta)
+		var hover_act: bool = char_activate_btn_rect.has_point(mpos)
+		_apply_spring_button("char_activate", hover_act, delta)
 
 func _apply_spring_button(key: String, is_hovered: bool, delta: float) -> void:
 	if is_hovered and not btn_hovered[key]:
@@ -1217,6 +1251,9 @@ func _draw() -> void:
 	if state == State.TRANSITION or transition_alpha > 0.001:
 		_draw_wave_transition_overlay()
 
+	if boss_warning_timer > 0.0:
+		_draw_boss_warning(boss_warning_timer)
+
 # --- Dynamic Background: Geometry Dash Grief Map Atmosphere + Terraria Underworld ---
 func _draw_dynamic_grief_background() -> void:
 	# Sky gradient: Dark obsidian abyss with rhythmic crimson beat pulse
@@ -1399,59 +1436,75 @@ func _draw_player() -> void:
 			_draw_nurse_sprite(p, facing, leg_swing)
 
 func _draw_bandit_sprite(p: Vector2, facing: int, leg_swing: float) -> void:
-	# Bandit (Outlaw/Rogue with dark cloak, crimson face mask & quick blade)
+	# Bandit (Outlaw Rogue: Dark Cowl, Outlaw Brim, Crimson Mask, Leather Bandolier & Loot Purse)
 	draw_rect(Rect2(p.x - 7 + leg_swing * 0.5, p.y - 12, 6, 12), Color("1a1a24"))
 	draw_rect(Rect2(p.x + 1 - leg_swing * 0.5, p.y - 12, 6, 12), Color("12121c"))
 	draw_rect(Rect2(p.x - 8 + leg_swing * 0.5, p.y - 4, 7, 4), Color("2c2c3e"))
 	draw_rect(Rect2(p.x + 1 - leg_swing * 0.5, p.y - 4, 7, 4), Color("2c2c3e"))
 
-	# Tunic, belt & stealth cloak
+	# Dark Tunic & Fluttering Stealth Cloak
 	draw_rect(Rect2(p.x - 9, p.y - 26, 18, 15), Color("232332"))
+	# Leather bandolier diagonal sash across chest with ammo studs
+	draw_line(Vector2(p.x - 8, p.y - 25), Vector2(p.x + 8, p.y - 15), Color("5c3822"), 2.2)
+	draw_circle(Vector2(p.x - 2, p.y - 20), 1.4, Color("e2b544"))
+	draw_circle(Vector2(p.x + 3, p.y - 17), 1.4, Color("e2b544"))
+
+	# Outlaw Belt, Gold Buckle & Leather Loot Coin Purse
 	draw_rect(Rect2(p.x - 9, p.y - 15, 18, 3), Color("4a2d1e"))
-	draw_rect(Rect2(p.x - 2, p.y - 15, 4, 3), Color("c8a855")) # Buckle
+	draw_rect(Rect2(p.x - 2, p.y - 15, 4, 3), Color("c8a855"))
+	# Loot coin pouch at hip
+	draw_rect(Rect2(p.x - (8 if facing > 0 else -4), p.y - 14, 4, 5), Color("7b4f2c"))
+	draw_circle(Vector2(p.x - (6 if facing > 0 else -6), p.y - 12), 1.0, Color("ffe762"))
+
 	# Cloak tail
 	draw_rect(Rect2(p.x - (11 if facing > 0 else -7), p.y - 24, 4, 16), Color("161622"))
 
-	# Head & Crimson Bandit Mask
+	# Head & Crimson Bandit Face Mask
 	draw_rect(Rect2(p.x - 7, p.y - 37, 14, 12), Color("f4b896"))
-	# Crimson mask covering lower face
 	draw_rect(Rect2(p.x - 7, p.y - 32, 14, 7), Color("b1203d"))
-	# Piercing eyes
 	var eye_x: float = p.x + (3.0 if facing > 0 else -5.0)
 	draw_rect(Rect2(eye_x, p.y - 35, 3.0, 2.5), Color("ffffff"))
 
-	# Dark Outlaw Cowl / Hood
+	# Dark Outlaw Cowl & Slouch Hat Brim
 	draw_rect(Rect2(p.x - 8, p.y - 41, 16, 6), Color("1a1a26"))
 	draw_rect(Rect2(p.x - (9 if facing > 0 else 5), p.y - 38, 5, 8), Color("1a1a26"))
+	draw_rect(Rect2(p.x - 10, p.y - 39, 20, 2), Color("12121c"))
 
-	# Arm & Sleek Curved Parry Blade
+	# Arm & Sleek Curved Parry Blade with Guard
 	var arm_x: float = p.x + (5.0 if facing > 0 else -11.0)
 	draw_rect(Rect2(arm_x, p.y - 23, 6, 9), Color("232332"))
 	var blade_col: Color = Color("41f3ff") if player["parry_cooldown_timer"] <= 0.0 else Color("5b6270")
 	draw_rect(Rect2(p.x + facing * 11.0 - 2.0, p.y - 28, 4, 16), blade_col)
+	draw_rect(Rect2(p.x + facing * 11.0 - 4.0, p.y - 20, 8, 3), Color("c8a855"))
 
 func _draw_scientist_sprite(p: Vector2, facing: int, leg_swing: float) -> void:
-	# Scientist (Chrono Physicist with lab coat, tech goggles & time gauntlet)
+	# Scientist (Chrono Physicist: White Lab Coat, Goggles, Quantum Vials & Emitter Gauntlet)
 	draw_rect(Rect2(p.x - 7 + leg_swing * 0.5, p.y - 12, 6, 12), Color("28323e"))
 	draw_rect(Rect2(p.x + 1 - leg_swing * 0.5, p.y - 12, 6, 12), Color("1c242e"))
 	draw_rect(Rect2(p.x - 8 + leg_swing * 0.5, p.y - 4, 7, 4), Color("11161d"))
 	draw_rect(Rect2(p.x + 1 - leg_swing * 0.5, p.y - 4, 7, 4), Color("11161d"))
 
-	# White Lab Coat & Shirt
+	# White Lab Coat & Blue Shirt
 	draw_rect(Rect2(p.x - 9, p.y - 26, 18, 16), Color("e4e8ec"))
-	draw_rect(Rect2(p.x - 2, p.y - 26, 4, 16), Color("4171a6")) # Inner shirt
-	draw_rect(Rect2(p.x - 9, p.y - 14, 18, 3), Color("2d3748")) # Belt
+	draw_rect(Rect2(p.x - 2, p.y - 26, 4, 16), Color("4171a6"))
+	# Front lab coat pocket with red & blue pens
+	draw_rect(Rect2(p.x + (2 if facing > 0 else -6), p.y - 24, 4, 5), Color("cbd5e0"))
+	draw_rect(Rect2(p.x + (3 if facing > 0 else -5), p.y - 26, 1, 3), Color("e63946"))
+	draw_rect(Rect2(p.x + (4 if facing > 0 else -4), p.y - 26, 1, 3), Color("2b6cb0"))
+
+	# Belt with glowing cyan & green quantum test tubes
+	draw_rect(Rect2(p.x - 9, p.y - 14, 18, 3), Color("2d3748"))
+	draw_rect(Rect2(p.x - 7, p.y - 13, 3, 5), Color("38ffff"))
+	draw_rect(Rect2(p.x + 4, p.y - 13, 3, 5), Color("48bb78"))
 
 	# Head & Glowing Chrono Goggles
 	draw_rect(Rect2(p.x - 7, p.y - 37, 14, 12), Color("f4b896"))
-	# Goggle strap
 	draw_rect(Rect2(p.x - 8, p.y - 34, 16, 4), Color("1a202c"))
-	# Glowing teal goggle lenses
 	var goggle_x: float = p.x + (2.0 if facing > 0 else -6.0)
 	draw_rect(Rect2(goggle_x, p.y - 35, 5.0, 5.0), Color("38ffff"))
 	draw_rect(Rect2(goggle_x + 1, p.y - 34, 2.0, 2.0), Color("ffffff"))
 
-	# Wild scientist hair
+	# Wild Mad Scientist Hair
 	draw_rect(Rect2(p.x - 8, p.y - 42, 16, 6), Color("a0aec0"))
 	draw_rect(Rect2(p.x - 9, p.y - 40, 4, 6), Color("a0aec0"))
 	draw_rect(Rect2(p.x + 5, p.y - 40, 4, 6), Color("a0aec0"))
@@ -1464,7 +1517,7 @@ func _draw_scientist_sprite(p: Vector2, facing: int, leg_swing: float) -> void:
 	draw_circle(Vector2(p.x + facing * 10.0, p.y - 19), 3.0, Color.WHITE)
 
 func _draw_nurse_sprite(p: Vector2, facing: int, leg_swing: float) -> void:
-	# Nurse (Classic Terraria Nurse with medical cap, red cross & medkit)
+	# Nurse (Combat Medic: Nurse Cap, Red Cross Apron, Stethoscope & Medkit)
 	draw_rect(Rect2(p.x - 7 + leg_swing * 0.5, p.y - 12, 6, 12), Color("d8e2dc"))
 	draw_rect(Rect2(p.x + 1 - leg_swing * 0.5, p.y - 12, 6, 12), Color("c2cec7"))
 	draw_rect(Rect2(p.x - 8 + leg_swing * 0.5, p.y - 4, 7, 4), Color("ffffff"))
@@ -1472,20 +1525,27 @@ func _draw_nurse_sprite(p: Vector2, facing: int, leg_swing: float) -> void:
 
 	# Nurse Dress & Red Cross Apron
 	draw_rect(Rect2(p.x - 8, p.y - 26, 16, 15), Color("ffffff"))
-	draw_rect(Rect2(p.x - 8, p.y - 15, 16, 3), Color("ff4d6d")) # Pink belt
-	# Red Cross on apron
+	draw_rect(Rect2(p.x - 8, p.y - 15, 16, 3), Color("ff4d6d"))
 	draw_rect(Rect2(p.x - 1.5, p.y - 23, 3, 7), Color("e63946"))
 	draw_rect(Rect2(p.x - 3.5, p.y - 21, 7, 3), Color("e63946"))
+
+	# Medical Stethoscope around neck
+	draw_arc(Vector2(p.x, p.y - 26), 4.5, 0.0, PI, 12, Color("4a5568"), 1.8)
+	draw_circle(Vector2(p.x + (1 if facing > 0 else -1), p.y - 21), 1.5, Color("cbd5e0"))
+
+	# First-aid medkit bag at hip
+	draw_rect(Rect2(p.x - (9 if facing > 0 else -5), p.y - 16, 5, 6), Color("ffffff"))
+	draw_line(Vector2(p.x - (7 if facing > 0 else -7), p.y - 15), Vector2(p.x - (7 if facing > 0 else -7), p.y - 11), Color("e63946"), 1.2)
+	draw_line(Vector2(p.x - (9 if facing > 0 else -5), p.y - 13), Vector2(p.x - (5 if facing > 0 else -9), p.y - 13), Color("e63946"), 1.2)
 
 	# Head & Face
 	draw_rect(Rect2(p.x - 7, p.y - 37, 14, 12), Color("f4b896"))
 	var eye_x: float = p.x + (3.0 if facing > 0 else -5.0)
 	draw_rect(Rect2(eye_x, p.y - 33, 2.5, 3.5), Color("1a1c2c"))
 
-	# Brown hair & Classic Nurse Cap
+	# Brown hair & Classic Nurse Cap with Red Cross
 	draw_rect(Rect2(p.x - 8, p.y - 40, 16, 5), Color("7a432e"))
-	draw_rect(Rect2(p.x - 6, p.y - 44, 12, 5), Color("ffffff")) # Cap
-	# Red cross on cap
+	draw_rect(Rect2(p.x - 6, p.y - 44, 12, 5), Color("ffffff"))
 	draw_rect(Rect2(p.x - 1, p.y - 43, 2, 4), Color("e63946"))
 	draw_rect(Rect2(p.x - 2, p.y - 42, 4, 2), Color("e63946"))
 
@@ -1801,15 +1861,17 @@ func _draw_main_menu() -> void:
 		_draw_credits_modal()
 
 func _draw_characters_modal() -> void:
-	draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), Color(0, 0, 0, 0.78))
-	_draw_rounded_box(char_box_rect, 24.0, Color("141824"), Color("41f3ff"), 4.0)
+	draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), Color(0.04, 0.06, 0.12, 0.85))
+	# Main modal container with drop shadow
+	_draw_rounded_box(Rect2(char_box_rect.position + Vector2(0, 10), char_box_rect.size), 22.0, Color(0, 0, 0, 0.6), Color.TRANSPARENT, 0.0)
+	_draw_rounded_box(char_box_rect, 22.0, Color("101626"), Color("41f3ff"), 3.5)
 
 	var font := ThemeDB.fallback_font
-	draw_string_outline(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 44), "CHOOSE YOUR CHARACTER", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 32, 5, Color.BLACK)
-	draw_string(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 44), "CHOOSE YOUR CHARACTER", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 32, Color("ffe762"))
+	draw_string_outline(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 34), "CHARACTER ARCHIVES & ABILITIES", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 26, 5, Color.BLACK)
+	draw_string(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 34), "CHARACTER ARCHIVES & ABILITIES", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 26, Color("ffe762"))
 
-	draw_string_outline(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 68), "CLICK ANY CHARACTER TO SELECT & VIEW THEIR SPECIAL ABILITY", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 15, 3, Color.BLACK)
-	draw_string(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 68), "CLICK ANY CHARACTER TO SELECT & VIEW THEIR SPECIAL ABILITY", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 15, Color("41f3ff"))
+	draw_string_outline(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 54), "SELECT ANY FIGHTER TO OPEN THEIR AUTHENTIC SKIN & COMBAT BLUEPRINT", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 12, 3, Color.BLACK)
+	draw_string(font, Vector2(char_box_rect.position.x, char_box_rect.position.y + 54), "SELECT ANY FIGHTER TO OPEN THEIR AUTHENTIC SKIN & COMBAT BLUEPRINT", HORIZONTAL_ALIGNMENT_CENTER, char_box_rect.size.x, 12, Color("41f3ff"))
 
 	# Close button ('X' at top right)
 	var r: float = CLOSE_BTN_RADIUS * btn_scales["char_close"]
@@ -1820,126 +1882,308 @@ func _draw_characters_modal() -> void:
 	draw_line(close_char_center + Vector2(-x_off, -x_off), close_char_center + Vector2(x_off, x_off), Color.WHITE, 3.0)
 	draw_line(close_char_center + Vector2(x_off, -x_off), close_char_center + Vector2(-x_off, x_off), Color.WHITE, 3.0)
 
-	# 3 Detailed Character Cards
 	var char_data := [
 		{
 			"name": "BANDIT",
 			"sub": "THE PHANTOM OUTLAW",
-			"intro": "The Bandit is a nimble rogue from the outer badlands who relies on split-second reflexes and ruthless momentum.",
+			"role": "AGILITY & BURST",
+			"icon": "🗡 BANDIT",
+			"skin_name": "OUTLAW SHADOW ROBES",
+			"skin_features": [
+				"Outlaw Cowl & Slouch Brim",
+				"Crimson Bandit Face Mask",
+				"Leather Bandolier & Ammo",
+				"Parry Blade & Loot Purse"
+			],
+			"lore": "The Bandit wears a classic outlaw cowl, crimson face mask, diagonal leather ammo sash, and a coin purse at his hip. His skin matches the ruthless badlands outlaw archetype.",
 			"ability_name": "SHADOW DASH",
-			"keybind": "KEYBIND: [SHIFT]",
+			"keybind": "[SHIFT] KEYBIND",
 			"cd": "5.0s COOLDOWN",
-			"desc": "Dashes a massive distance in the blink of an eye to run from lasers. Grants total hitbox negation (invulnerability) while dashing with wind trails & a roaring woosh sound.",
+			"mechanics": "Dashes a massive distance across the arena in a flash. Grants complete invulnerability (hitbox negation) while dashing, leaving wind trails and a roaring sound effect.",
+			"tactics": "Use Shadow Dash to instantly slip through dense bullet walls, evade boss attacks, or reposition behind enemies right before they fire.",
+			"ratings": {"mobility": 0.95, "defense": 0.45, "control": 0.35},
 			"theme_col": Color("ff9e2c"),
 			"border_col": Color("ff5e7e")
 		},
 		{
 			"name": "SCIENTIST",
 			"sub": "THE CHRONO PHYSICIST",
-			"intro": "The Scientist is an eccentric chronomancer and quantum researcher whose pocket anomaly generator can halt reality itself.",
+			"role": "CONTROL & TIMING",
+			"icon": "⚡ SCIENTIST",
+			"skin_name": "CHRONOMANCER LAB COAT",
+			"skin_features": [
+				"White Lab Coat & Pen Pocket",
+				"Bifocal Chrono Goggles",
+				"Quantum Vials on Utility Belt",
+				"Chrono Emitter Gauntlet"
+			],
+			"lore": "The Scientist sports a white laboratory coat with pens in his breast pocket, wild gray hair, glowing teal goggles, and belt-strapped chemical vials containing temporal catalysts.",
 			"ability_name": "TEMPORAL FREEZE",
-			"keybind": "KEYBIND: [SHIFT]",
+			"keybind": "[SHIFT] KEYBIND",
 			"cd": "10.0s COOLDOWN",
-			"desc": "Freezes both enemies and lasers at the same time for 1.0 second! Halts reality in mid-air so you can safely reposition and time your next perfect parry.",
+			"mechanics": "Stops reality itself for 1.0 full second! Freezes both flying mobs and incoming lasers in mid-air with an ethereal chronofield while letting you move freely.",
+			"tactics": "Freeze the battlefield when caught in unavoidable crossfires. Walk right up to frozen lasers and ready your parry keybind the millisecond time resumes.",
+			"ratings": {"mobility": 0.60, "defense": 0.65, "control": 0.95},
 			"theme_col": Color("38ffff"),
 			"border_col": Color("3b6cd9")
 		},
 		{
 			"name": "NURSE",
 			"sub": "THE COMBAT MEDIC",
-			"intro": "The Nurse is a compassionate field medic who carries restorative elixirs that continuously mend mortal wounds.",
+			"role": "SUSTAIN & SURVIVAL",
+			"icon": "✚ NURSE",
+			"skin_name": "FIRST RESPONDER UNIFORM",
+			"skin_features": [
+				"Nurse Cap with Red Cross",
+				"Medical Neck Stethoscope",
+				"Red Cross Apron Dress",
+				"First-Aid Medkit Bag"
+			],
+			"lore": "The Nurse wears a crisp white nurse cap emblazoned with a red cross, medical stethoscope, protective scrub apron, and a first-aid medkit bag carrying restorative elixirs.",
 			"ability_name": "VITAL REGENERATION",
-			"keybind": "PASSIVE (AUTOMATIC)",
-			"cd": "EVERY 8.0s RECOVERY",
-			"desc": "Passively regenerates 1 Heart every 8 seconds without pressing any keybind. Keeps you constantly resilient and surviving through the most intense bullet hell waves.",
+			"keybind": "[PASSIVE] AUTOMATIC",
+			"cd": "HEALS EVERY 8.0s",
+			"mechanics": "Passively restores 1 Heart every 8 seconds automatically without pressing any key. Keeps you resilient throughout extended battles and bullet hell swarms.",
+			"tactics": "The best choice for outlasting the Wave 5 Boss. Even if you take hits, focus on safe distance parrying while your passive constantly replenishes your health.",
+			"ratings": {"mobility": 0.55, "defense": 0.95, "control": 0.45},
 			"theme_col": Color("55ff99"),
 			"border_col": Color("ff5e7e")
 		}
 	]
 
+	# 1. Top 3 Character Selector Tabs (Click to open each character!)
 	for idx in range(3):
-		var d = char_data[idx]
-		var is_selected: bool = (selected_character == (idx as Character))
-		var card_scale: float = btn_scales["card_%d" % idx]
-		var base_rect: Rect2 = char_card_rects[idx]
-		var center := base_rect.get_center()
-		var scaled_sz := base_rect.size * card_scale
-		var rect := Rect2(center - scaled_sz * 0.5, scaled_sz)
+		var cd = char_data[idx]
+		var is_viewing: bool = (int(viewing_character) == idx)
+		var is_active: bool = (int(selected_character) == idx)
+		var t_rect: Rect2 = char_tab_rects[idx]
+		var t_scale: float = btn_scales["tab_%d" % idx]
+		var s_rect := Rect2(t_rect.get_center() - t_rect.size * t_scale * 0.5, t_rect.size * t_scale)
+		var is_hovered: bool = btn_hovered["tab_%d" % idx]
 
-		# Card Background & Glowing Border
-		var fill_col := Color("1c2438") if not is_selected else Color("222f4c")
-		var brd_col: Color = d["theme_col"] if is_selected else Color("3d4b68")
-		var brd_w: float = 4.5 if is_selected else 2.0
+		_draw_rounded_box(Rect2(s_rect.position + Vector2(0, 4), s_rect.size), 12.0, Color(0, 0, 0, 0.35), Color.TRANSPARENT, 0.0)
+		var tab_fill := Color(cd["theme_col"].r * 0.3, cd["theme_col"].g * 0.3, cd["theme_col"].b * 0.3, 0.9) if is_viewing else (Color("1a2436") if is_hovered else Color("131a29"))
+		var tab_brd: Color = cd["theme_col"] if is_viewing else (Color("41f3ff") if is_hovered else Color("2c3b52"))
+		var tab_brd_w: float = 2.5 if is_viewing else (1.8 if is_hovered else 1.2)
+		_draw_rounded_box(s_rect, 12.0, tab_fill, tab_brd, tab_brd_w)
 
-		_draw_rounded_box(Rect2(rect.position + Vector2(0, 6), rect.size), 16.0, Color(0, 0, 0, 0.4), Color.TRANSPARENT, 0.0)
-		_draw_rounded_box(rect, 16.0, fill_col, brd_col, brd_w)
+		# Tab Icon & Title
+		draw_string_outline(font, Vector2(s_rect.position.x + 16, s_rect.position.y + 24), cd["icon"], HORIZONTAL_ALIGNMENT_LEFT, -1, 15, 3, Color.BLACK)
+		draw_string(font, Vector2(s_rect.position.x + 16, s_rect.position.y + 24), cd["icon"], HORIZONTAL_ALIGNMENT_LEFT, -1, 15, cd["theme_col"] if is_viewing else Color.WHITE)
 
-		# Top Selected Ribbon
-		if is_selected:
-			_draw_rounded_box(Rect2(rect.position.x + 12, rect.position.y + 10, rect.size.x - 24, 26), 8.0, Color("41f3ff", 0.25), Color("41f3ff"), 1.5)
-			draw_string(font, Vector2(rect.position.x, rect.position.y + 28), "[ SELECTED - ACTIVE FIGHTER ]", HORIZONTAL_ALIGNMENT_CENTER, rect.size.x, 13, Color("ffe762"))
+		draw_string(font, Vector2(s_rect.position.x + 16, s_rect.position.y + 40), cd["sub"], HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color("94a3b8"))
 
-		# Character Name & Subtitle
-		var name_y: float = rect.position.y + (64.0 if is_selected else 48.0)
-		draw_string_outline(font, Vector2(rect.position.x, name_y), d["name"], HORIZONTAL_ALIGNMENT_CENTER, rect.size.x, 24, 4, Color.BLACK)
-		draw_string(font, Vector2(rect.position.x, name_y), d["name"], HORIZONTAL_ALIGNMENT_CENTER, rect.size.x, 24, d["theme_col"])
+		# Status badges on the right side of tab
+		if is_active:
+			var act_badge := Rect2(s_rect.end.x - 90, s_rect.position.y + 12, 78, 22)
+			_draw_rounded_box(act_badge, 6.0, Color("ffe762", 0.25), Color("ffe762"), 1.2)
+			draw_string(font, Vector2(act_badge.position.x, act_badge.position.y + 16), "★ ACTIVE", HORIZONTAL_ALIGNMENT_CENTER, act_badge.size.x, 10, Color("ffe762"))
+		elif is_viewing:
+			var view_badge := Rect2(s_rect.end.x - 90, s_rect.position.y + 12, 78, 22)
+			_draw_rounded_box(view_badge, 6.0, Color("41f3ff", 0.2), Color("41f3ff"), 1.0)
+			draw_string(font, Vector2(view_badge.position.x, view_badge.position.y + 16), "OPENED", HORIZONTAL_ALIGNMENT_CENTER, view_badge.size.x, 10, Color("41f3ff"))
 
-		draw_string(font, Vector2(rect.position.x, name_y + 18), d["sub"], HORIZONTAL_ALIGNMENT_CENTER, rect.size.x, 12, Color("a0aec0"))
+	# Currently Opened Character
+	var cur_idx := int(viewing_character)
+	var d = char_data[cur_idx]
+	var is_active_fighter: bool = (selected_character == viewing_character)
 
-		# Character Animated Sprite Preview
-		var preview_pos := Vector2(center.x, name_y + 82.0)
-		_draw_character_preview(idx, preview_pos)
+	# 2. LEFT PANEL: Skin Showcase Stage
+	var left_rect := Rect2(80, 144, 440, 520)
+	_draw_rounded_box(Rect2(left_rect.position + Vector2(0, 8), left_rect.size), 18.0, Color(0, 0, 0, 0.45), Color.TRANSPARENT, 0.0)
+	_draw_rounded_box(left_rect, 18.0, Color("0e1524", 0.95), d["theme_col"], 2.2)
 
-		# Introduction Box
-		var intro_y: float = preview_pos.y + 26.0
-		var intro_box := Rect2(rect.position.x + 14, intro_y, rect.size.x - 28, 68)
-		_draw_rounded_box(intro_box, 8.0, Color("141824", 0.75), Color("2d3748"), 1.0)
-		_draw_wrapped_text(font, d["intro"], intro_box.position + Vector2(8, 16), intro_box.size.x - 16, 12, Color("e2e8f0"))
+	# Stage Header Banner
+	var s_hdr := Rect2(left_rect.position.x + 14, left_rect.position.y + 12, left_rect.size.x - 28, 26)
+	_draw_rounded_box(s_hdr, 8.0, Color("141d2e"), d["theme_col"], 1.2)
+	draw_string(font, Vector2(s_hdr.position.x, s_hdr.position.y + 18), "AUTHENTIC FIGHTER SKIN: " + d["skin_name"], HORIZONTAL_ALIGNMENT_CENTER, s_hdr.size.x, 11, d["theme_col"])
 
-		# Ability Header & Details
-		var ab_box_y: float = intro_y + 76.0
-		var ab_box := Rect2(rect.position.x + 14, ab_box_y, rect.size.x - 28, 142)
-		_draw_rounded_box(ab_box, 10.0, Color("0f1420", 0.85), d["theme_col"], 1.5)
+	# Character Name & Subtitle
+	draw_string_outline(font, Vector2(left_rect.position.x, left_rect.position.y + 64), d["name"], HORIZONTAL_ALIGNMENT_CENTER, left_rect.size.x, 26, 4, Color.BLACK)
+	draw_string(font, Vector2(left_rect.position.x, left_rect.position.y + 64), d["name"], HORIZONTAL_ALIGNMENT_CENTER, left_rect.size.x, 26, d["theme_col"])
 
-		draw_string_outline(font, Vector2(ab_box.position.x, ab_box.position.y + 20), d["ability_name"], HORIZONTAL_ALIGNMENT_CENTER, ab_box.size.x, 15, 3, Color.BLACK)
-		draw_string(font, Vector2(ab_box.position.x, ab_box.position.y + 20), d["ability_name"], HORIZONTAL_ALIGNMENT_CENTER, ab_box.size.x, 15, Color("ffe762"))
+	draw_string(font, Vector2(left_rect.position.x, left_rect.position.y + 82), d["sub"], HORIZONTAL_ALIGNMENT_CENTER, left_rect.size.x, 11, Color("94a3b8"))
 
-		# Keybind & Cooldown tags
-		draw_string(font, Vector2(ab_box.position.x + 8, ab_box.position.y + 38), d["keybind"], HORIZONTAL_ALIGNMENT_LEFT, -1, 11, d["theme_col"])
-		draw_string(font, Vector2(ab_box.end.x - 8, ab_box.position.y + 38), d["cd"], HORIZONTAL_ALIGNMENT_RIGHT, -1, 11, Color("ff9e2c"))
+	# Pedestal Stage
+	var ped_center := Vector2(left_rect.get_center().x, left_rect.position.y + 225.0)
+	var time_sec: float = Time.get_ticks_msec() * 0.001
+	var bob: float = sin(time_sec * 3.2) * 3.5
 
-		_draw_wrapped_text(font, d["desc"], ab_box.position + Vector2(8, 54), ab_box.size.x - 16, 11, Color("cbd5e0"))
+	# Pedestal Base Rings
+	draw_circle(ped_center + Vector2(0, 18), 58.0, Color(0, 0, 0, 0.4))
+	draw_circle(ped_center + Vector2(0, 14), 52.0, Color(d["theme_col"].r, d["theme_col"].g, d["theme_col"].b, 0.22))
+	draw_arc(ped_center + Vector2(0, 14), 52.0, 0.0, TAU, 36, d["theme_col"], 2.5)
 
-func _draw_character_preview(idx: int, pos: Vector2) -> void:
-	# Clean miniature preview pedestal
-	draw_circle(pos + Vector2(0, 4), 22.0, Color(0, 0, 0, 0.45))
-	draw_arc(pos + Vector2(0, 4), 22.0, 0.0, TAU, 24, Color("41f3ff", 0.5), 1.5)
+	# Holographic Pulse Wave
+	var pulse: float = fmod(time_sec * 18.0, 16.0)
+	draw_arc(ped_center + Vector2(0, 14), 52.0 + pulse, 0.0, TAU, 36, Color(d["theme_col"].r, d["theme_col"].g, d["theme_col"].b, maxf(0.0, 0.5 - pulse / 16.0)), 1.5)
 
-	match idx:
-		0: # Bandit
-			_draw_bandit_sprite(pos + Vector2(0, 2), 1, 0.0)
-		1: # Scientist
-			_draw_scientist_sprite(pos + Vector2(0, 2), 1, 0.0)
-		2: # Nurse
-			_draw_nurse_sprite(pos + Vector2(0, 2), 1, 0.0)
+	# Character Ambient Particles
+	match cur_idx:
+		0:
+			for i in range(4):
+				var ang: float = time_sec * 2.0 + i * (TAU / 4.0)
+				var e_pos := ped_center + Vector2(cos(ang) * 44.0, sin(ang) * 16.0 - 25.0)
+				draw_circle(e_pos, 2.0, Color("ff9e2c", 0.75))
+		1:
+			for i in range(4):
+				var ang: float = -time_sec * 2.5 + i * (TAU / 4.0)
+				var e_pos := ped_center + Vector2(cos(ang) * 46.0, sin(ang) * 16.0 - 25.0)
+				draw_circle(e_pos, 2.2, Color("38ffff", 0.85))
+		2:
+			for i in range(3):
+				var hp_y: float = fmod(time_sec * 24.0 + i * 20.0, 50.0)
+				var hp_x: float = sin(time_sec * 2.0 + i) * 36.0
+				var h_pos := ped_center + Vector2(hp_x, -10.0 - hp_y)
+				draw_string(font, h_pos, "✚", HORIZONTAL_ALIGNMENT_CENTER, 14, 12, Color("55ff99", 0.75))
 
-func _draw_wrapped_text(font: Font, text: String, start_pos: Vector2, max_w: float, font_size: int, col: Color) -> void:
-	var words := text.split(" ")
-	var cur_line := ""
-	var line_y: float = start_pos.y
-	var line_spacing: float = font_size + 4.0
+	# 2.8x Scaled Animated Character Sprite
+	var sprite_pos := ped_center + Vector2(0, 6 + bob)
+	draw_set_transform(sprite_pos, 0.0, Vector2(2.8, 2.8))
+	match cur_idx:
+		0:
+			_draw_bandit_sprite(Vector2.ZERO, 1, 0.0)
+		1:
+			_draw_scientist_sprite(Vector2.ZERO, 1, 0.0)
+		2:
+			_draw_nurse_sprite(Vector2.ZERO, 1, 0.0)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-	for w in words:
-		var test_line: String = cur_line + (" " if cur_line != "" else "") + w
-		var sz: Vector2 = font.get_string_size(test_line, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
-		if sz.x > max_w and cur_line != "":
-			draw_string(font, Vector2(start_pos.x, line_y), cur_line, HORIZONTAL_ALIGNMENT_LEFT, max_w, font_size, col)
-			cur_line = w
-			line_y += line_spacing
-		else:
-			cur_line = test_line
-	if cur_line != "":
-		draw_string(font, Vector2(start_pos.x, line_y), cur_line, HORIZONTAL_ALIGNMENT_LEFT, max_w, font_size, col)
+	# Skin Matches Name Breakdown (4 Pills)
+	draw_string_outline(font, Vector2(left_rect.position.x + 16, left_rect.position.y + 295), "AUTHENTIC SKIN PIECES (MATCHES NAME):", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 2, Color.BLACK)
+	draw_string(font, Vector2(left_rect.position.x + 16, left_rect.position.y + 295), "AUTHENTIC SKIN PIECES (MATCHES NAME):", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("ffe762"))
+
+	var pill_w: float = 196.0
+	var pill_h: float = 24.0
+	for i in range(4):
+		var col_idx := i % 2
+		var row_idx := i / 2
+		var px := left_rect.position.x + 16.0 + col_idx * (pill_w + 16.0)
+		var py := left_rect.position.y + 308.0 + row_idx * (pill_h + 8.0)
+		var p_rect := Rect2(px, py, pill_w, pill_h)
+		_draw_rounded_box(p_rect, 6.0, Color("141c2c"), Color("2d3f5a"), 1.0)
+		draw_string(font, Vector2(px + 8, py + 16), "⬡ " + d["skin_features"][i], HORIZONTAL_ALIGNMENT_LEFT, pill_w - 12, 10, Color("e2e8f0"))
+
+	# Backstory / Lore
+	var lore_box := Rect2(left_rect.position.x + 14, left_rect.position.y + 378, left_rect.size.x - 28, 128)
+	_draw_rounded_box(lore_box, 10.0, Color("0b101c", 0.9), Color("1e2a3c"), 1.0)
+	draw_string(font, Vector2(lore_box.position.x + 10, lore_box.position.y + 18), "LORE & ARCHETYPE:", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, d["theme_col"])
+	_draw_wrapped_text(font, d["lore"], lore_box.position + Vector2(10, 36), lore_box.size.x - 20, 11, Color("cbd5e1"))
+
+	# 3. RIGHT PANEL: Cool Ability Blueprint & Tactics
+	var right_rect := Rect2(540, 144, 660, 520)
+	_draw_rounded_box(Rect2(right_rect.position + Vector2(0, 8), right_rect.size), 18.0, Color(0, 0, 0, 0.45), Color.TRANSPARENT, 0.0)
+	_draw_rounded_box(right_rect, 18.0, Color("0b121e", 0.95), Color("283854"), 2.0)
+
+	# Ability Header Card
+	var ab_hdr := Rect2(right_rect.position.x + 16, right_rect.position.y + 14, right_rect.size.x - 32, 78)
+	_draw_rounded_box(ab_hdr, 12.0, Color("121a2b"), d["theme_col"], 1.5)
+
+	# Ability Name
+	draw_string_outline(font, Vector2(ab_hdr.position.x + 16, ab_hdr.position.y + 36), d["ability_name"], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, 4, Color.BLACK)
+	draw_string(font, Vector2(ab_hdr.position.x + 16, ab_hdr.position.y + 36), d["ability_name"], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color("ffe762"))
+
+	draw_string(font, Vector2(ab_hdr.position.x + 16, ab_hdr.position.y + 58), "PRIMARY SPECIAL ABILITY", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, d["theme_col"])
+
+	# Keybind pill
+	var kb_pill := Rect2(ab_hdr.end.x - 260, ab_hdr.position.y + 26, 115, 26)
+	_draw_rounded_box(kb_pill, 6.0, Color(d["theme_col"].r, d["theme_col"].g, d["theme_col"].b, 0.25), d["theme_col"], 1.2)
+	draw_string(font, Vector2(kb_pill.position.x, kb_pill.position.y + 18), d["keybind"], HORIZONTAL_ALIGNMENT_CENTER, kb_pill.size.x, 10, Color.WHITE)
+
+	# Cooldown pill
+	var cd_pill := Rect2(ab_hdr.end.x - 135, ab_hdr.position.y + 26, 120, 26)
+	_draw_rounded_box(cd_pill, 6.0, Color("ff9e2c", 0.2), Color("ff9e2c"), 1.2)
+	draw_string(font, Vector2(cd_pill.position.x, cd_pill.position.y + 18), d["cd"], HORIZONTAL_ALIGNMENT_CENTER, cd_pill.size.x, 10, Color("ffbd59"))
+
+	# Ability Mechanics Box
+	var mech_box := Rect2(right_rect.position.x + 16, right_rect.position.y + 102, right_rect.size.x - 32, 108)
+	_draw_rounded_box(mech_box, 10.0, Color("101626"), Color("24334a"), 1.0)
+	draw_string(font, Vector2(mech_box.position.x + 12, mech_box.position.y + 20), "⚡ ABILITY MECHANICS & EXECUTION", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("41f3ff"))
+	_draw_wrapped_text(font, d["mechanics"], mech_box.position + Vector2(12, 40), mech_box.size.x - 24, 12, Color("e2e8f0"))
+
+	# Pro Tactics Box
+	var tact_box := Rect2(right_rect.position.x + 16, right_rect.position.y + 220, right_rect.size.x - 32, 98)
+	_draw_rounded_box(tact_box, 10.0, Color("101626"), Color("24334a"), 1.0)
+	draw_string(font, Vector2(tact_box.position.x + 12, tact_box.position.y + 20), "⚔ PRO COMBAT STRATEGY & SYNERGIES", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("ffe762"))
+	_draw_wrapped_text(font, d["tactics"], tact_box.position + Vector2(12, 40), tact_box.size.x - 24, 11, Color("cbd5e1"))
+
+	# Fighter Attribute Meters
+	var attr_box := Rect2(right_rect.position.x + 16, right_rect.position.y + 328, right_rect.size.x - 32, 82)
+	_draw_rounded_box(attr_box, 10.0, Color("101626"), Color("24334a"), 1.0)
+	draw_string(font, Vector2(attr_box.position.x + 12, attr_box.position.y + 18), "📊 FIGHTER COMBAT METERS", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("94a3b8"))
+
+	var ratings = d["ratings"]
+	var bar_labels := ["MOBILITY", "DEFENSE", "CONTROL"]
+	var bar_keys := ["mobility", "defense", "control"]
+	for i in range(3):
+		var by: float = attr_box.position.y + 38.0 + i * 15.0
+		draw_string(font, Vector2(attr_box.position.x + 12, by + 8), bar_labels[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color("718096"))
+		var m_rect := Rect2(attr_box.position.x + 95, by, 500, 8)
+		draw_rect(m_rect, Color("1a2436"))
+		var fill_w: float = 500.0 * ratings[bar_keys[i]]
+		draw_rect(Rect2(m_rect.position.x, m_rect.position.y, fill_w, 8), d["theme_col"])
+
+	# Bottom Action Button
+	var act_btn_rect := char_activate_btn_rect
+	var act_scale: float = btn_scales["char_activate"]
+	var s_act := Rect2(act_btn_rect.get_center() - act_btn_rect.size * act_scale * 0.5, act_btn_rect.size * act_scale)
+	var is_act_hovered: bool = btn_hovered["char_activate"]
+
+	_draw_rounded_box(Rect2(s_act.position + Vector2(0, 4), s_act.size), 14.0, Color(0, 0, 0, 0.4), Color.TRANSPARENT, 0.0)
+	if is_active_fighter:
+		_draw_rounded_box(s_act, 14.0, Color(0.12, 0.42, 0.22, 0.95), Color("ffe762"), 2.5)
+		draw_string_outline(font, Vector2(s_act.position.x, s_act.position.y + 33), "★ CURRENT ACTIVE FIGHTER (EQUIPPED)", HORIZONTAL_ALIGNMENT_CENTER, s_act.size.x, 16, 4, Color.BLACK)
+		draw_string(font, Vector2(s_act.position.x, s_act.position.y + 33), "★ CURRENT ACTIVE FIGHTER (EQUIPPED)", HORIZONTAL_ALIGNMENT_CENTER, s_act.size.x, 16, Color.WHITE)
+	else:
+		var btn_fill := Color("24334d") if is_act_hovered else Color("182338")
+		var btn_brd: Color = Color("6bfaff") if is_act_hovered else Color("41f3ff")
+		_draw_rounded_box(s_act, 14.0, btn_fill, btn_brd, 2.0)
+		var label_str: String = "CHOOSE & EQUIP " + d["name"]
+		draw_string_outline(font, Vector2(s_act.position.x, s_act.position.y + 33), label_str, HORIZONTAL_ALIGNMENT_CENTER, s_act.size.x, 16, 4, Color.BLACK)
+		draw_string(font, Vector2(s_act.position.x, s_act.position.y + 33), label_str, HORIZONTAL_ALIGNMENT_CENTER, s_act.size.x, 16, Color("41f3ff"))
+
+func _draw_boss_warning(timer: float) -> void:
+	var font := ThemeDB.fallback_font
+	var pulse: float = sin((3.8 - timer) * 11.0) * 0.5 + 0.5
+	var alpha: float = clampf(timer / 0.5, 0.0, 1.0)
+
+	# 1. Pulsing Red Screen Flash Vignette
+	var red_tint := Color(0.85, 0.04, 0.12, (0.16 + pulse * 0.18) * alpha)
+	draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), red_tint)
+
+	# 2. Top & Bottom Hazard Warning Stripes
+	var bar_h: float = 38.0
+	var top_bar := Rect2(0, 0, VIEW_W, bar_h)
+	var bot_bar := Rect2(0, VIEW_H - bar_h, VIEW_W, bar_h)
+	draw_rect(top_bar, Color(0.12, 0.01, 0.03, 0.92 * alpha))
+	draw_rect(bot_bar, Color(0.12, 0.01, 0.03, 0.92 * alpha))
+	draw_line(Vector2(0, bar_h), Vector2(VIEW_W, bar_h), Color(1.0, 0.15, 0.25, alpha), 2.5)
+	draw_line(Vector2(0, VIEW_H - bar_h), Vector2(VIEW_W, VIEW_H - bar_h), Color(1.0, 0.15, 0.25, alpha), 2.5)
+
+	# Moving warning text ticker
+	var ticker_text := "⚠ WARNING // DANGER // EXTREME APEX BOSS DETECTED // ⚠ WARNING // DANGER // EXTREME APEX BOSS DETECTED // ⚠ WARNING //"
+	var ticker_x: float = fmod(-Time.get_ticks_msec() * 0.12, 400.0)
+	draw_string(font, Vector2(ticker_x, 24), ticker_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(1, 0.2, 0.3, alpha))
+	draw_string(font, Vector2(ticker_x, VIEW_H - 14), ticker_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(1, 0.2, 0.3, alpha))
+
+	# 3. Main Center Warning Badge
+	var banner_w: float = 880.0
+	var banner_h: float = 126.0
+	var banner_rect := Rect2((VIEW_W - banner_w) * 0.5, 175.0, banner_w, banner_h)
+
+	_draw_rounded_box(Rect2(banner_rect.position + Vector2(0, 8), banner_rect.size), 18.0, Color(0, 0, 0, 0.6 * alpha), Color.TRANSPARENT, 0.0)
+	var box_fill := Color(0.16, 0.02, 0.05, 0.94 * alpha)
+	var box_brd := Color(1.0, 0.15 + pulse * 0.4, 0.25, alpha)
+	_draw_rounded_box(banner_rect, 18.0, box_fill, box_brd, 3.5)
+
+	# Flashing Siren Headlines
+	var title_col := Color("ff3b5b") if pulse > 0.35 else Color("ffffff")
+	draw_string_outline(font, Vector2(banner_rect.position.x, banner_rect.position.y + 50), "⚠ WARNING: BOSS APPROACHING ⚠", HORIZONTAL_ALIGNMENT_CENTER, banner_w, 36, 6, Color.BLACK)
+	draw_string(font, Vector2(banner_rect.position.x, banner_rect.position.y + 50), "⚠ WARNING: BOSS APPROACHING ⚠", HORIZONTAL_ALIGNMENT_CENTER, banner_w, 36, Color(title_col.r, title_col.g, title_col.b, alpha))
+
+	var sub_text := "THE APEX ANOMALY • 20 LASER DEFLECTIONS REQUIRED"
+	draw_string_outline(font, Vector2(banner_rect.position.x, banner_rect.position.y + 88), sub_text, HORIZONTAL_ALIGNMENT_CENTER, banner_w, 18, 4, Color.BLACK)
+	draw_string(font, Vector2(banner_rect.position.x, banner_rect.position.y + 88), sub_text, HORIZONTAL_ALIGNMENT_CENTER, banner_w, 18, Color(1.0, 0.88, 0.35, alpha))
 
 func _draw_game_over_overlay() -> void:
 	draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), Color(0.06, 0.02, 0.05, 0.74))
@@ -1950,7 +2194,9 @@ func _draw_game_over_overlay() -> void:
 	draw_string_outline(font, Vector2(0, 245), "You reached Wave %d" % current_wave, HORIZONTAL_ALIGNMENT_CENTER, VIEW_W, 28, 5, Color.BLACK)
 	draw_string(font, Vector2(0, 245), "You reached Wave %d" % current_wave, HORIZONTAL_ALIGNMENT_CENTER, VIEW_W, 28, Color("ffe762"))
 
-	_draw_bouncy_button(start_btn_rect, btn_scales["start"], Color("ff5e7e"), Color("ff9e2c"), "RETRY WAVE 1", 28)
+	draw_string(font, Vector2(0, 280), "PRESS TO RESTART", HORIZONTAL_ALIGNMENT_CENTER, VIEW_W, 14, Color("cbd5e0"))
+
+	_draw_bouncy_button(start_btn_rect, btn_scales["start"], Color("ff5e7e"), Color("ff9e2c"), "BOUNCE BACK", 28)
 	_draw_bouncy_button(credits_btn_rect, btn_scales["credits"], Color("3b5dc9"), Color("41f3ff"), "MAIN MENU", 28)
 
 func _draw_bouncy_button(rect: Rect2, scale_val: float, fill_col: Color, border_col: Color, label: String, font_size: int) -> void:
