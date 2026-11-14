@@ -97,6 +97,14 @@ var particles: Array = []
 var floating_texts: Array = []
 var screen_shake: float = 0.0
 
+# --- Combat Power-Up Orbs ---
+enum PowerUpType { TRI_BEAM, SHIELD, BULLET_TIME, HEART }
+var powerups: Array = []
+var powerup_next_id: int = 0
+var powerup_tribeam_timer: float = 0.0
+var powerup_shield_active: bool = false
+var powerup_bullet_time_timer: float = 0.0
+
 var mobs_to_spawn: int = 0
 var spawn_timer: float = 0.0
 
@@ -169,7 +177,8 @@ var player2 := {
 	"is_down": false,
 	"parry_active_timer": 0.0,
 	"parry_flash": 0.0,
-	"invuln_timer": 0.0
+	"invuln_timer": 0.0,
+	"shield_active": false
 }
 
 var btn_scales := {
@@ -639,6 +648,7 @@ func _update_networking(delta: float) -> void:
 				"hearts": player["hearts"],
 				"is_down": player.get("is_down", false),
 				"parry": player["parry_active_timer"] > 0.0,
+				"shield": powerup_shield_active,
 				"char": selected_character
 			})
 
@@ -700,12 +710,39 @@ func _handle_game_message(data: Dictionary) -> void:
 			player2["walk_anim"] = float(data.get("walk_anim", 0.0))
 			player2["hearts"] = int(data.get("hearts", 5))
 			player2["is_down"] = bool(data.get("is_down", false))
+			player2["shield_active"] = bool(data.get("shield", false))
 			player2["character"] = int(data.get("char", player2["character"]))
 			if bool(data.get("parry", false)):
 				player2["parry_flash"] = 0.18
 		"player_parry":
 			player2["parry_flash"] = 0.18
 			_play_sfx(520.0, 960.0, 0.08, 0)
+		"powerup_spawn":
+			var p := {
+				"id": int(data.get("id", 0)),
+				"pos": Vector2(data.get("pos_x", 0.0), data.get("pos_y", 0.0)),
+				"vel": Vector2(data.get("vel_x", 0.0), data.get("vel_y", 0.0)),
+				"type": int(data.get("type", 0)),
+				"life": 14.0,
+				"anim": 0.0
+			}
+			powerups.append(p)
+		"powerup_collect":
+			var p_id: int = int(data.get("id", 0))
+			var p_type: int = int(data.get("type", 0))
+			for i in range(powerups.size() - 1, -1, -1):
+				if powerups[i].get("id", -1) == p_id:
+					var p = powerups[i]
+					_collect_powerup(p, true)
+					break
+			if p_type == 1:
+				player2["shield_active"] = true
+			elif p_type == 2:
+				powerup_bullet_time_timer = 3.5
+		"shield_broken":
+			player2["shield_active"] = false
+			_spawn_burst(player2["pos"] - Vector2(0, 18), Color("38ffff"), 20, 220.0)
+			_add_floating_text("PARTNER SHIELD BROKE!", player2["pos"] - Vector2(0, 48), Color("38ffff"))
 		"client_deflect":
 			if is_host:
 				var c_pos := Vector2(data.get("pos_x", 0.0), data.get("pos_y", 0.0))
@@ -1011,6 +1048,11 @@ func _begin_game_from_wave_1() -> void:
 	lasers.clear()
 	particles.clear()
 	floating_texts.clear()
+	powerups.clear()
+	powerup_tribeam_timer = 0.0
+	powerup_shield_active = false
+	powerup_bullet_time_timer = 0.0
+	player2["shield_active"] = false
 	_start_wave_transition(1, 0.0)
 
 func _start_wave_transition(wave_num: int, initial_pause: float) -> void:
@@ -1109,20 +1151,26 @@ func _update_playing_state(delta: float) -> void:
 		_update_particles_and_text(delta)
 		return
 
+	# Power-up Timers
+	powerup_tribeam_timer = maxf(0.0, powerup_tribeam_timer - delta)
+	powerup_bullet_time_timer = maxf(0.0, powerup_bullet_time_timer - delta)
+	var world_delta: float = delta * 0.35 if powerup_bullet_time_timer > 0.0 else delta
+
 	# Regular unfreezed updates
 	_update_player(delta)
 	if is_multiplayer and player2["active"]:
 		player2["pos"] = player2["pos"].lerp(player2.get("target_pos", player2["pos"]), minf(1.0, 18.0 * delta))
 	if not is_multiplayer or is_host:
-		_update_wave_spawner(delta)
-		_update_mobs(delta)
+		_update_wave_spawner(world_delta)
+		_update_mobs(world_delta)
 	else:
 		# Client-side smooth mob visuals & wing animations
 		for m in mobs:
-			m["anim"] = m.get("anim", 0.0) + delta * 3.0
+			m["anim"] = m.get("anim", 0.0) + world_delta * 3.0
 			if m.get("hit_flash", 0.0) > 0.0:
 				m["hit_flash"] = maxf(0.0, m["hit_flash"] - delta)
-	_update_lasers(delta)
+	_update_lasers(world_delta)
+	_update_powerups(delta)
 	_update_particles_and_text(delta)
 
 func _update_dynamic_scenery(delta: float) -> void:
@@ -1298,6 +1346,24 @@ func _check_parry_deflection() -> void:
 				_play_sfx(680.0, 1480.0, 0.16, 0)
 				_spawn_burst(l["pos"], Color("73eff7"), 18, 260.0)
 				_add_floating_text("PERFECT PARRY!", p_center + Vector2(0, -34), Color("73eff7"))
+
+				# Tri-Beam Splitter Power-Up
+				if powerup_tribeam_timer > 0.0:
+					for angle_offset in [-0.42, 0.42]:
+						var extra_dir := aim_dir.rotated(angle_offset)
+						lasers.append({
+							"pos": l["pos"],
+							"vel": extra_dir * l["speed"],
+							"speed": l["speed"],
+							"bounced": true,
+							"owner": null,
+							"homing_target": target_mob,
+							"color": Color("ffe762"),
+							"trail": []
+						})
+					_add_floating_text("⚡ TRI-BEAM DEFLECTION!", p_center + Vector2(0, -56), Color("ffe762"))
+					_play_sfx(740.0, 1680.0, 0.16, 0)
+
 				if is_multiplayer and not is_host:
 					_send_game_message({"action": "client_deflect", "pos_x": p_center.x, "pos_y": p_center.y})
 
@@ -1649,6 +1715,9 @@ func _damage_boss(boss: Dictionary, laser_idx: int = -1) -> void:
 		_spawn_burst(boss["pos"], Color("ff2a4b"), 60, 320.0)
 		_spawn_burst(boss["pos"], Color("41f3ff"), 60, 320.0)
 		_add_floating_text("EXTREME BOSS DEFEATED!", Vector2(VIEW_W * 0.5, 200), Color("ffe762"))
+		_spawn_powerup(boss["pos"] + Vector2(-60, 0), 0)
+		_spawn_powerup(boss["pos"], 1)
+		_spawn_powerup(boss["pos"] + Vector2(60, 0), 3)
 		mobs.erase(boss)
 
 func _get_nearest_mob(from_pos: Vector2):
@@ -1736,6 +1805,8 @@ func _update_lasers(delta: float) -> void:
 						_add_floating_text("ELIMINATED!", m["pos"], Color("ffdd55"))
 						_play_sfx(240.0, 75.0, 0.22, 1)
 						screen_shake = 8.5
+						if randf() < 0.35:
+							_spawn_powerup(m["pos"])
 						mobs.remove_at(j)
 						lasers.remove_at(i)
 					break
@@ -1744,6 +1815,16 @@ func _update_lasers(delta: float) -> void:
 
 func _damage_player() -> void:
 	if player["invuln_timer"] > 0.0:
+		return
+	if powerup_shield_active:
+		powerup_shield_active = false
+		player["invuln_timer"] = 0.55
+		screen_shake = 6.0
+		_play_sfx(600.0, 1200.0, 0.25, 0)
+		_spawn_burst(player["pos"] - Vector2(0, 18), Color("38ffff"), 25, 240.0)
+		_add_floating_text("SHIELD BROKEN! [PROTECTED]", player["pos"] - Vector2(0, 48), Color("38ffff"))
+		if is_multiplayer:
+			_send_game_message({"action": "shield_broken"})
 		return
 	player["hearts"] -= 1
 	player["invuln_timer"] = 0.65
@@ -1817,6 +1898,105 @@ func _update_particles_and_text(delta: float) -> void:
 			floating_texts.remove_at(i)
 
 # ==============================================================================
+# COMBAT POWER-UPS SYSTEM
+# ==============================================================================
+func _spawn_powerup(pos: Vector2, p_type: int = -1) -> void:
+	if p_type == -1:
+		p_type = randi() % 4
+	powerup_next_id += 1
+	var p := {
+		"id": powerup_next_id,
+		"pos": pos,
+		"vel": Vector2(randf_range(-65.0, 65.0), randf_range(-190.0, -260.0)),
+		"type": p_type,
+		"life": 14.0,
+		"anim": randf() * TAU
+	}
+	powerups.append(p)
+	if is_multiplayer and is_host:
+		_send_game_message({
+			"action": "powerup_spawn",
+			"id": p["id"],
+			"type": p_type,
+			"pos_x": pos.x,
+			"pos_y": pos.y,
+			"vel_x": p["vel"].x,
+			"vel_y": p["vel"].y
+		})
+
+func _update_powerups(delta: float) -> void:
+	for i in range(powerups.size() - 1, -1, -1):
+		var p = powerups[i]
+		p["life"] -= delta
+		p["anim"] = p.get("anim", 0.0) + delta
+		if p["life"] <= 0.0:
+			powerups.remove_at(i)
+			continue
+
+		# Gravity & friction
+		p["vel"].y += 620.0 * delta
+		p["pos"] += p["vel"] * delta
+
+		# Ground bounce
+		if p["pos"].y >= GROUND_Y - 14.0:
+			p["pos"].y = GROUND_Y - 14.0
+			p["vel"].y = -p["vel"].y * 0.42
+			p["vel"].x *= 0.82
+			if absf(p["vel"].y) < 16.0:
+				p["vel"].y = 0.0
+
+		# Platform bounce
+		for plat in platforms:
+			if p["vel"].y > 0.0 and p["pos"].x >= plat.position.x and p["pos"].x <= plat.end.x:
+				if p["pos"].y >= plat.position.y - 12.0 and p["pos"].y <= plat.position.y + 10.0:
+					p["pos"].y = plat.position.y - 12.0
+					p["vel"].y = -p["vel"].y * 0.42
+					p["vel"].x *= 0.82
+
+		# Collection by local player
+		var p_center: Vector2 = player["pos"] - Vector2(0, player["h"] * 0.5)
+		if not player.get("is_down", false) and p_center.distance_to(p["pos"]) <= 36.0:
+			_collect_powerup(p)
+			break
+
+func _collect_powerup(p: Dictionary, by_teammate: bool = false) -> void:
+	var p_type: int = p["type"]
+	var p_pos: Vector2 = p["pos"]
+	var p_id: int = p.get("id", -1)
+	powerups.erase(p)
+
+	if by_teammate:
+		_spawn_burst(p_pos, Color("ffe762"), 14, 150.0)
+		_add_floating_text("TEAMMATE GOT BUFF!", p_pos - Vector2(0, 24), Color("ffe762"))
+		return
+
+	# Apply buff to local player
+	match p_type:
+		0: # TRI_BEAM
+			powerup_tribeam_timer = 10.0
+			_add_floating_text("⚡ TRI-BEAM ACTIVE! (10s)", player["pos"] - Vector2(0, 48), Color("ffe762"))
+			_play_sfx(640.0, 1280.0, 0.22, 0)
+			_spawn_burst(player["pos"] - Vector2(0, 18), Color("ffe762"), 22, 220.0)
+		1: # SHIELD
+			powerup_shield_active = true
+			_add_floating_text("🛡️ AEGIS SHIELD READY!", player["pos"] - Vector2(0, 48), Color("38ffff"))
+			_play_sfx(540.0, 1100.0, 0.22, 0)
+			_spawn_burst(player["pos"] - Vector2(0, 18), Color("38ffff"), 22, 220.0)
+		2: # BULLET TIME
+			powerup_bullet_time_timer = 3.5
+			_add_floating_text("⏱️ BULLET TIME! (3.5s)", player["pos"] - Vector2(0, 48), Color("c084fc"))
+			_play_sfx(440.0, 220.0, 0.35, 0)
+			_spawn_burst(player["pos"] - Vector2(0, 18), Color("c084fc"), 24, 240.0)
+		3: # HEART
+			player["hearts"] = mini(player["max_hearts"], player["hearts"] + 1)
+			_add_floating_text("❤️ +1 HEART RESTORED!", player["pos"] - Vector2(0, 48), Color("ff4b6b"))
+			_play_heal_sfx()
+			_spawn_burst(player["pos"] - Vector2(0, 18), Color("ff4b6b"), 20, 190.0)
+
+	if is_multiplayer:
+		_send_game_message({"action": "powerup_collect", "id": p_id, "type": p_type})
+
+# ==============================================================================
 # CUSTOM RENDERING (Terraria + Grief Tryhard Map, Characters, Mobs, UI)
 # ==============================================================================
 func _draw() -> void:
@@ -1831,6 +2011,7 @@ func _draw() -> void:
 
 	if state in [State.PLAYING, State.TRANSITION, State.GAME_OVER]:
 		_draw_dash_ghosts()
+		_draw_powerups()
 		_draw_player()
 		if is_multiplayer and player2["active"]:
 			_draw_remote_player()
@@ -1838,6 +2019,10 @@ func _draw() -> void:
 		_draw_lasers()
 		_draw_particles_and_texts()
 		_draw_hud()
+
+	if powerup_bullet_time_timer > 0.0 and state == State.PLAYING:
+		var bt_alpha := clampf(powerup_bullet_time_timer / 0.5, 0.0, 1.0) * 0.16
+		draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), Color(0.65, 0.35, 0.95, bt_alpha))
 
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
@@ -2020,6 +2205,10 @@ func _draw_player() -> void:
 		draw_circle(p_center, 90.0 * (1.0 + sin(Time.get_ticks_msec() * 0.02) * 0.1), Color(0.25, 0.85, 1.0, 0.14))
 		draw_arc(p_center, 78.0, 0.0, TAU, 32, Color(0.4, 0.95, 1.0, 0.6), 2.5)
 
+	# Aegis Energy Shield Aura
+	if powerup_shield_active:
+		_draw_shield_bubble(p_center)
+
 	if is_multiplayer and player.get("is_down", false):
 		var font := ThemeDB.fallback_font
 		draw_circle(p - Vector2(0, 10), 22.0, Color(0.12, 0.02, 0.05, 0.6))
@@ -2056,6 +2245,9 @@ func _draw_remote_player() -> void:
 	var p2: Vector2 = player2["pos"]
 	var facing: int = player2["facing"]
 	var font := ThemeDB.fallback_font
+
+	if player2.get("shield_active", false):
+		_draw_shield_bubble(p2 - Vector2(0, 18.0))
 
 	if player2["parry_flash"] > 0.0:
 		var p2_center := p2 - Vector2(0, 18.0)
@@ -2318,6 +2510,49 @@ func _draw_extreme_boss(boss: Dictionary) -> void:
 	draw_circle(iris_pos + p_dir * (r * 0.06), r * 0.22, Color("140910"))
 	draw_circle(iris_pos + p_dir * (r * 0.06), r * 0.10, Color.WHITE)
 
+func _draw_shield_bubble(center: Vector2) -> void:
+	var shield_pulse: float = sin(Time.get_ticks_msec() * 0.007) * 2.5
+	var r: float = 29.0 + shield_pulse
+	draw_circle(center, r + 4.0, Color("38ffff", 0.14))
+	draw_arc(center, r, 0.0, TAU, 32, Color("38ffff", 0.85), 2.5)
+	draw_arc(center, r - 5.0, 0.0, TAU, 16, Color("73eff7", 0.45), 1.5)
+
+func _draw_powerups() -> void:
+	var font := ThemeDB.fallback_font
+	for p in powerups:
+		var pos: Vector2 = p["pos"] + Vector2(0, sin(p.get("anim", 0.0) * 3.5) * 4.0)
+		var p_type: int = p["type"]
+		var life: float = p["life"]
+
+		# Blink warning when expiring in the last 3 seconds
+		if life < 3.0 and int(life * 8.0) % 2 == 0:
+			continue
+
+		var theme_col: Color
+		var icon_char: String
+		match p_type:
+			0:
+				theme_col = Color("ffe762") # Tri-beam Gold
+				icon_char = "TRI"
+			1:
+				theme_col = Color("38ffff") # Aegis Shield Cyan
+				icon_char = "SHD"
+			2:
+				theme_col = Color("c084fc") # Bullet Time Violet
+				icon_char = "SLO"
+			3:
+				theme_col = Color("ff4b6b") # Heart Ruby
+				icon_char = "+HP"
+
+		# Outer glowing aura
+		var pulse: float = sin(p.get("anim", 0.0) * 4.0) * 2.5
+		draw_circle(pos, 16.0 + pulse, Color(theme_col.r, theme_col.g, theme_col.b, 0.22))
+		draw_circle(pos, 13.0, Color("0b0f19", 0.88))
+		draw_arc(pos, 13.0, 0.0, TAU, 24, theme_col, 2.2)
+
+		# Inner icon text
+		draw_string(font, Vector2(pos.x - 12.0, pos.y + 4.0), icon_char, HORIZONTAL_ALIGNMENT_CENTER, 24, 10, theme_col)
+
 func _draw_lasers() -> void:
 	for l in lasers:
 		var pos: Vector2 = l["pos"]
@@ -2421,6 +2656,24 @@ func _draw_hud() -> void:
 
 	draw_string_outline(font, Vector2(28, hud_y + 26.0), parry_status + "   |   " + ability_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, 3, Color.BLACK)
 	draw_string(font, Vector2(28, hud_y + 26.0), parry_status + "   |   " + ability_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, ability_col)
+
+	# Active Power-up Badges
+	var buffs: Array = []
+	if powerup_tribeam_timer > 0.0:
+		buffs.append({"text": "⚡ TRI-BEAM: %.1fs" % powerup_tribeam_timer, "col": Color("ffe762")})
+	if powerup_shield_active:
+		buffs.append({"text": "🛡️ AEGIS SHIELD: READY", "col": Color("38ffff")})
+	if powerup_bullet_time_timer > 0.0:
+		buffs.append({"text": "⏱️ BULLET TIME: %.1fs" % powerup_bullet_time_timer, "col": Color("c084fc")})
+
+	var bx: float = 28.0
+	for b in buffs:
+		var b_text: String = b["text"]
+		var sz: Vector2 = font.get_string_size(b_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13)
+		var pill := Rect2(bx, hud_y + 46.0, sz.x + 18, 22)
+		_draw_rounded_box(pill, 6.0, Color("0f172a", 0.9), b["col"], 1.3)
+		draw_string(font, Vector2(bx + 9, hud_y + 62.0), b_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, b["col"])
+		bx += sz.x + 22.0
 
 	# WAVE 5: EXTREME BOSS HEALTH BAR
 	if current_wave == 5:
