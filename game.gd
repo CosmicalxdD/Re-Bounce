@@ -103,12 +103,17 @@ var spawn_timer: float = 0.0
 # --- Menu & UI ---
 var credits_open: bool = false
 var characters_open: bool = false
+var online_lobby_open: bool = false
 var viewing_character: Character = Character.BANDIT
 var boss_warning_timer: float = 0.0
 
-var start_btn_rect := Rect2(470, 305, 340, 66)
-var characters_btn_rect := Rect2(470, 388, 340, 66)
-var credits_btn_rect := Rect2(470, 471, 340, 66)
+var start_btn_rect := Rect2(470, 280, 340, 56)
+var online_btn_rect := Rect2(470, 350, 340, 56)
+var characters_btn_rect := Rect2(470, 420, 340, 56)
+var credits_btn_rect := Rect2(470, 490, 340, 56)
+
+var retry_btn_rect := Rect2(470, 335, 340, 62)
+var game_over_menu_btn_rect := Rect2(470, 415, 340, 62)
 
 var credits_box_rect := Rect2(350, 180, 580, 370)
 var close_credits_center := Vector2(895, 215)
@@ -123,12 +128,62 @@ var char_tab_rects: Array[Rect2] = [
 ]
 var char_activate_btn_rect := Rect2(556, 566, 628, 54)
 
+# --- Online Lobby & WebRTC Networking ---
+var online_box_rect := Rect2(160, 55, 960, 610)
+var close_online_center := Vector2(1095, 85)
+var host_card_rect := Rect2(190, 115, 435, 455)
+var join_card_rect := Rect2(655, 115, 435, 455)
+var host_create_btn_rect := Rect2(225, 345, 365, 52)
+var host_start_btn_rect := Rect2(225, 415, 365, 56)
+var join_enter_btn_rect := Rect2(690, 385, 365, 54)
+var server_url_bar_rect := Rect2(190, 580, 900, 42)
+
+var signaling_server_url: String = "wss://assumed-residents-oxford-gotta.trycloudflare.com"
+var editing_server_url: bool = false
+var ws_client: WebSocketPeer = null
+var rtc_conn: WebRTCPeerConnection = null
+var rtc_data_channel: WebRTCDataChannel = null
+
+var is_multiplayer: bool = false
+var is_host: bool = false
+var my_room_code: String = ""
+var join_code_input: String = ""
+var online_status: String = "DISCONNECTED"
+var peer_is_ready: bool = false
+var net_sync_timer: float = 0.0
+var host_world_sync_timer: float = 0.0
+var revive_timer: float = 0.0
+var p2_reviving_progress: float = 0.0
+
+# Remote Teammate Player State
+var player2 := {
+	"active": false,
+	"pos": Vector2(740.0, 630.0),
+	"target_pos": Vector2(740.0, 630.0),
+	"vel": Vector2.ZERO,
+	"facing": -1,
+	"walk_anim": 0.0,
+	"character": Character.SCIENTIST,
+	"hearts": 5,
+	"max_hearts": 5,
+	"is_down": false,
+	"parry_active_timer": 0.0,
+	"parry_flash": 0.0,
+	"invuln_timer": 0.0
+}
+
 var btn_scales := {
 	"start": 1.0,
+	"online": 1.0,
 	"characters": 1.0,
 	"credits": 1.0,
 	"close": 1.0,
 	"char_close": 1.0,
+	"online_close": 1.0,
+	"host_create": 1.0,
+	"host_start": 1.0,
+	"join_btn": 1.0,
+	"edit_server": 1.0,
 	"tab_0": 1.0,
 	"tab_1": 1.0,
 	"tab_2": 1.0,
@@ -136,10 +191,16 @@ var btn_scales := {
 }
 var btn_vel := {
 	"start": 0.0,
+	"online": 0.0,
 	"characters": 0.0,
 	"credits": 0.0,
 	"close": 0.0,
 	"char_close": 0.0,
+	"online_close": 0.0,
+	"host_create": 0.0,
+	"host_start": 0.0,
+	"join_btn": 0.0,
+	"edit_server": 0.0,
 	"tab_0": 0.0,
 	"tab_1": 0.0,
 	"tab_2": 0.0,
@@ -147,10 +208,16 @@ var btn_vel := {
 }
 var btn_hovered := {
 	"start": false,
+	"online": false,
 	"characters": false,
 	"credits": false,
 	"close": false,
 	"char_close": false,
+	"online_close": false,
+	"host_create": false,
+	"host_start": false,
+	"join_btn": false,
+	"edit_server": false,
 	"tab_0": false,
 	"tab_1": false,
 	"tab_2": false,
@@ -177,8 +244,22 @@ const BASS_NOTES := [130.81, 130.81, 155.56, 130.81, 138.59, 138.59, 123.47, 146
 
 func _ready() -> void:
 	randomize()
+	if FileAccess.file_exists("user://server_url.txt"):
+		var saved_url := FileAccess.get_file_as_string("user://server_url.txt").strip_edges()
+		if saved_url != "" and not saved_url.contains("niro.hackclub.app"):
+			signaling_server_url = saved_url
+		else:
+			_save_server_url(signaling_server_url)
+	else:
+		_save_server_url(signaling_server_url)
 	_generate_scenery()
 	_setup_audio()
+
+func _save_server_url(url: String) -> void:
+	var f := FileAccess.open("user://server_url.txt", FileAccess.WRITE)
+	if f:
+		f.store_string(url)
+		f.close()
 
 func _generate_scenery() -> void:
 	trees.clear()
@@ -366,6 +447,354 @@ func _fill_audio_buffers() -> void:
 			sfx_playback.push_frame(Vector2(sample, sample))
 
 # ==============================================================================
+# WEBRTC & WEBSOCKET NETWORKING ENGINE
+# ==============================================================================
+func _clean_url(raw: String) -> String:
+	var u := raw.strip_edges()
+	while u.ends_with("/"):
+		u = u.substr(0, u.length() - 1)
+	if u.begins_with("https://"):
+		u = "wss://" + u.substr(8)
+	elif u.begins_with("http://"):
+		u = "ws://" + u.substr(7)
+	elif not u.begins_with("ws://") and not u.begins_with("wss://"):
+		u = "wss://" + u
+	return u
+
+func _connect_to_signaling() -> void:
+	if ws_client != null:
+		ws_client.close()
+	ws_client = WebSocketPeer.new()
+	signaling_server_url = _clean_url(signaling_server_url)
+	_save_server_url(signaling_server_url)
+	var err := ws_client.connect_to_url(signaling_server_url)
+	if err != OK:
+		online_status = "FAILED TO CONNECT (ERROR %d)" % err
+	else:
+		online_status = "CONNECTING TO SIGNALING SERVER..."
+
+func _create_online_room() -> void:
+	if ws_client == null or ws_client.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		_connect_to_signaling()
+	online_status = "CREATING ROOM..."
+	_send_signaling_packet({"type": "create"})
+
+func _join_online_room() -> void:
+	if join_code_input.length() != 4:
+		return
+	if ws_client == null or ws_client.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		_connect_to_signaling()
+	online_status = "JOINING ROOM %s..." % join_code_input
+	_send_signaling_packet({"type": "join", "code": join_code_input})
+
+func _send_signaling_packet(packet: Dictionary) -> void:
+	if ws_client != null and ws_client.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		ws_client.send_text(JSON.stringify(packet))
+
+func _send_game_message(data: Dictionary) -> void:
+	# 1. High speed WebRTC P2P direct data channel
+	if rtc_data_channel != null and rtc_data_channel.get_ready_state() == WebRTCDataChannel.STATE_OPEN:
+		rtc_data_channel.put_packet(JSON.stringify(data).to_utf8_buffer())
+	# 2. Reliable WebSocket relay fallback on Hack Club Nest Linux server
+	elif ws_client != null and ws_client.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		ws_client.send_text(JSON.stringify({"type": "msg", "data": data}))
+
+func _init_webrtc() -> void:
+	rtc_conn = WebRTCPeerConnection.new()
+	rtc_conn.initialize({
+		"iceServers": [{ "urls": ["stun:stun.l.google.com:19302"] }]
+	})
+	rtc_conn.session_description_created.connect(_on_session_description_created)
+	rtc_conn.ice_candidate_created.connect(_on_ice_candidate_created)
+	rtc_data_channel = rtc_conn.create_data_channel("bounce_back", {"negotiated": true, "id": 1})
+
+func _on_session_description_created(type: String, sdp: String) -> void:
+	if rtc_conn != null:
+		rtc_conn.set_local_description(type, sdp)
+	_send_signaling_packet({
+		"type": "signal",
+		"data": {
+			"type": type,
+			"sdp": sdp
+		}
+	})
+
+func _on_ice_candidate_created(media: String, index: int, name: String) -> void:
+	_send_signaling_packet({
+		"type": "signal",
+		"data": {
+			"type": "ice",
+			"media": media,
+			"index": index,
+			"name": name
+		}
+	})
+
+func _handle_signal_packet(sig: Dictionary) -> void:
+	if rtc_conn == null:
+		return
+	var s_type: String = sig.get("type", "")
+	if s_type == "offer":
+		rtc_conn.set_remote_description(s_type, sig.get("sdp", ""))
+		rtc_conn.create_answer()
+	elif s_type == "answer":
+		rtc_conn.set_remote_description(s_type, sig.get("sdp", ""))
+	elif s_type == "ice":
+		rtc_conn.add_ice_candidate(sig.get("media", ""), sig.get("index", 0), sig.get("name", ""))
+
+func _host_start_coop_game() -> void:
+	if not peer_is_ready:
+		return
+	is_multiplayer = true
+	is_host = true
+	player2["active"] = true
+	online_lobby_open = false
+	_send_game_message({
+		"action": "start_game",
+		"wave": 1,
+		"host_char": selected_character
+	})
+	_begin_game_from_wave_1()
+
+func _update_networking(delta: float) -> void:
+	# 1. Poll WebRTC Connection & Data Channel
+	if rtc_conn != null:
+		rtc_conn.poll()
+	if rtc_data_channel != null:
+		rtc_data_channel.poll()
+		while rtc_data_channel.get_available_packet_count() > 0:
+			var pkt := rtc_data_channel.get_packet()
+			var msg_str := pkt.get_string_from_utf8()
+			var json := JSON.new()
+			if json.parse(msg_str) == OK and json.data is Dictionary:
+				_handle_game_message(json.data)
+
+	# 2. Poll WebSocket Signaling & Relay
+	if ws_client != null:
+		ws_client.poll()
+		var ws_state := ws_client.get_ready_state()
+		if ws_state == WebSocketPeer.STATE_OPEN:
+			if online_status == "CONNECTING TO SIGNALING SERVER...":
+				online_status = "CONNECTED TO SIGNALING SERVER"
+			while ws_client.get_available_packet_count() > 0:
+				var pkt := ws_client.get_packet()
+				var msg_str := pkt.get_string_from_utf8()
+				var json := JSON.new()
+				if json.parse(msg_str) == OK and json.data is Dictionary:
+					var d: Dictionary = json.data
+					var msg_type: String = d.get("type", "")
+					match msg_type:
+						"created":
+							my_room_code = d.get("code", "")
+							is_host = true
+							online_status = "ROOM %s READY! WAITING FOR FRIEND" % my_room_code
+							_play_sfx(540.0, 880.0, 0.15, 0)
+							_init_webrtc()
+						"joined":
+							my_room_code = d.get("code", "")
+							is_host = false
+							peer_is_ready = true
+							online_status = "CONNECTED TO ROOM %s! READY!" % my_room_code
+							_play_sfx(540.0, 880.0, 0.15, 0)
+							_init_webrtc()
+							_send_game_message({"action": "peer_greeting", "char": selected_character})
+						"peer_joined":
+							peer_is_ready = true
+							online_status = "FRIEND CONNECTED! READY TO START!"
+							_play_sfx(660.0, 990.0, 0.2, 0)
+							if is_host:
+								_init_webrtc()
+								rtc_conn.create_offer()
+						"peer_left":
+							peer_is_ready = false
+							player2["active"] = false
+							online_status = "FRIEND DISCONNECTED"
+							_play_sfx(330.0, 220.0, 0.2, 0)
+							if state == State.PLAYING:
+								_add_floating_text("CO-OP PARTNER LEFT!", Vector2(VIEW_W * 0.5, 200), Color("ff3b5b"))
+						"signal":
+							_handle_signal_packet(d.get("data", {}))
+						"msg":
+							_handle_game_message(d.get("data", {}))
+						"error":
+							online_status = "ERROR: " + d.get("message", "Unknown error")
+							_play_sfx(220.0, 160.0, 0.2, 0)
+		elif ws_state == WebSocketPeer.STATE_CLOSED:
+			if online_lobby_open and online_status != "DISCONNECTED":
+				online_status = "DISCONNECTED FROM SERVER"
+
+	# 3. Synchronize Player Movement & Actions during Gameplay
+	if is_multiplayer and state == State.PLAYING:
+		net_sync_timer -= delta
+		if net_sync_timer <= 0.0:
+			net_sync_timer = 0.05 # 20 FPS sync rate
+			_send_game_message({
+				"action": "player_sync",
+				"pos_x": player["pos"].x,
+				"pos_y": player["pos"].y,
+				"vel_x": player["vel"].x,
+				"vel_y": player["vel"].y,
+				"facing": player["facing"],
+				"walk_anim": player["walk_anim"],
+				"hearts": player["hearts"],
+				"is_down": player.get("is_down", false),
+				"parry": player["parry_active_timer"] > 0.0,
+				"char": selected_character
+			})
+
+		# Host World Sync (Mobs, Lasers & Wave authority)
+		if is_host:
+			host_world_sync_timer -= delta
+			if host_world_sync_timer <= 0.0:
+				host_world_sync_timer = 0.08 # 12.5 FPS world authority sync
+				var mobs_data: Array = []
+				for m in mobs:
+					mobs_data.append({
+						"pos_x": m["pos"].x,
+						"pos_y": m["pos"].y,
+						"type": m["type"],
+						"hp": m.get("hp", 1),
+						"max_hp": m.get("max_hp", 20 if m.get("is_boss", false) else 1),
+						"is_boss": m.get("is_boss", false),
+						"flash": m.get("hit_flash", 0.0) > 0.0,
+						"glow": m.get("charge_glow", 0.0),
+						"anim": m.get("anim", 0.0)
+					})
+				var lasers_data: Array = []
+				for l in lasers:
+					lasers_data.append({
+						"pos_x": l["pos"].x,
+						"pos_y": l["pos"].y,
+						"vel_x": l["vel"].x,
+						"vel_y": l["vel"].y,
+						"bounced": l["bounced"]
+					})
+				_send_game_message({
+					"action": "host_world_sync",
+					"wave": current_wave,
+					"mobs": mobs_data,
+					"lasers": lasers_data,
+					"mobs_left": mobs.size() + mobs_to_spawn,
+					"boss_warning": boss_warning_timer
+				})
+
+func _handle_game_message(data: Dictionary) -> void:
+	var act: String = data.get("action", "")
+	match act:
+		"peer_greeting":
+			peer_is_ready = true
+			player2["active"] = true
+			player2["character"] = data.get("char", Character.SCIENTIST)
+		"start_game":
+			is_multiplayer = true
+			is_host = false
+			player2["active"] = true
+			player2["character"] = data.get("host_char", Character.BANDIT)
+			online_lobby_open = false
+			_begin_game_from_wave_1()
+		"player_sync":
+			player2["active"] = true
+			player2["target_pos"] = Vector2(data.get("pos_x", player2["pos"].x), data.get("pos_y", player2["pos"].y))
+			player2["vel"] = Vector2(data.get("vel_x", 0.0), data.get("vel_y", 0.0))
+			player2["facing"] = int(data.get("facing", 1))
+			player2["walk_anim"] = float(data.get("walk_anim", 0.0))
+			player2["hearts"] = int(data.get("hearts", 5))
+			player2["is_down"] = bool(data.get("is_down", false))
+			player2["character"] = int(data.get("char", player2["character"]))
+			if bool(data.get("parry", false)):
+				player2["parry_flash"] = 0.18
+		"player_parry":
+			player2["parry_flash"] = 0.18
+			_play_sfx(520.0, 960.0, 0.08, 0)
+		"client_deflect":
+			if is_host:
+				var c_pos := Vector2(data.get("pos_x", 0.0), data.get("pos_y", 0.0))
+				for l in lasers:
+					if not l["bounced"] and l["pos"].distance_to(c_pos) <= PARRY_RADIUS + 30.0:
+						l["bounced"] = true
+						var target_mob = _get_nearest_mob(l["pos"])
+						l["homing_target"] = target_mob
+						l["speed"] = maxf(l["vel"].length() * 1.55, 780.0)
+						var aim_dir: Vector2 = (target_mob["pos"] - l["pos"]).normalized() if target_mob != null else -l["vel"].normalized()
+						l["vel"] = aim_dir * l["speed"]
+						l["color"] = Color("38ffff")
+						screen_shake = 7.0
+						_play_sfx(680.0, 1480.0, 0.16, 0)
+						_spawn_burst(l["pos"], Color("73eff7"), 18, 260.0)
+						_add_floating_text("TEAMMATE PARRY!", c_pos + Vector2(0, -34), Color("73eff7"))
+						break
+		"host_world_sync":
+			if not is_host:
+				current_wave = data.get("wave", current_wave)
+				boss_warning_timer = data.get("boss_warning", boss_warning_timer)
+				var m_list: Array = data.get("mobs", [])
+				mobs.clear()
+				for m_item in m_list:
+					var is_boss: bool = m_item.get("is_boss", false)
+					var m_dict := {
+						"pos": Vector2(m_item.get("pos_x", 0.0), m_item.get("pos_y", 0.0)),
+						"type": int(m_item.get("type", 0)),
+						"hp": int(m_item.get("hp", 1)),
+						"max_hp": int(m_item.get("max_hp", 20 if is_boss else 1)),
+						"is_boss": is_boss,
+						"radius": 52.0 if is_boss else 20.0,
+						"charge_glow": float(m_item.get("glow", 0.0)),
+						"hit_flash": 0.15 if m_item.get("flash", false) else 0.0,
+						"anim": float(m_item.get("anim", 0.0)),
+						"name": "THE APEX ANOMALY" if is_boss else ""
+					}
+					mobs.append(m_dict)
+				var mobs_left_val: int = data.get("mobs_left", mobs.size())
+				mobs_to_spawn = max(0, mobs_left_val - mobs.size())
+
+				var l_list: Array = data.get("lasers", [])
+				lasers.clear()
+				for l_item in l_list:
+					lasers.append({
+						"pos": Vector2(l_item.get("pos_x", 0.0), l_item.get("pos_y", 0.0)),
+						"vel": Vector2(l_item.get("vel_x", 0.0), l_item.get("vel_y", 0.0)),
+						"speed": 600.0,
+						"bounced": l_item.get("bounced", false),
+						"owner": null,
+						"homing_target": null,
+						"color": Color("38ffff") if l_item.get("bounced", false) else Color("ff3b5b"),
+						"trail": []
+					})
+		"player2_hit":
+			if not is_host:
+				_damage_player()
+		"player_down":
+			player2["is_down"] = true
+			player2["hearts"] = 0
+			_add_floating_text("FRIEND DOWNED! REVIVE THEM!", player2["pos"] - Vector2(0, 48), Color("ff3b5b"))
+			if player.get("is_down", false):
+				state = State.GAME_OVER
+				_play_sfx(140.0, 50.0, 0.55, 1)
+		"revived":
+			var p_id: int = data.get("player_id", 1)
+			if (p_id == 1 and not is_host) or (p_id == 2 and is_host):
+				player["is_down"] = false
+				player["hearts"] = 2
+				_play_heal_sfx()
+				_spawn_burst(player["pos"], Color("55ff99"), 24, 200.0)
+				_add_floating_text("REVIVED BY FRIEND!", player["pos"] - Vector2(0, 48), Color("55ff99"))
+			else:
+				player2["is_down"] = false
+				player2["hearts"] = 2
+				_play_heal_sfx()
+				_spawn_burst(player2["pos"], Color("55ff99"), 24, 200.0)
+				_add_floating_text("TEAMMATE REVIVED!", player2["pos"] - Vector2(0, 48), Color("55ff99"))
+		"game_over":
+			state = State.GAME_OVER
+			_play_sfx(140.0, 50.0, 0.55, 1)
+		"restart_game":
+			_begin_game_from_wave_1()
+		"client_request_restart":
+			if is_host and state == State.GAME_OVER:
+				_send_game_message({"action": "restart_game"})
+				_begin_game_from_wave_1()
+
+# ==============================================================================
 # INPUT & MENU LOGIC
 # ==============================================================================
 func _input(event: InputEvent) -> void:
@@ -392,10 +821,34 @@ func _input(event: InputEvent) -> void:
 						btn_vel["char_activate"] = 6.0
 						_play_sfx(540.0, 960.0, 0.18, 0)
 						_spawn_burst(char_activate_btn_rect.get_center(), Color("41f3ff"), 24, 200.0)
+			elif online_lobby_open:
+				if mpos.distance_to(close_online_center) <= CLOSE_BTN_RADIUS + 6.0:
+					online_lobby_open = false
+					editing_server_url = false
+					_play_sfx(520.0, 260.0, 0.1, 0)
+				elif host_create_btn_rect.has_point(mpos):
+					_play_sfx(540.0, 880.0, 0.15, 0)
+					_create_online_room()
+				elif host_start_btn_rect.has_point(mpos) and peer_is_ready:
+					_play_sfx(440.0, 880.0, 0.18, 0)
+					_host_start_coop_game()
+				elif join_enter_btn_rect.has_point(mpos) and join_code_input.length() == 4:
+					_play_sfx(540.0, 880.0, 0.15, 0)
+					_join_online_room()
+				elif server_url_bar_rect.has_point(mpos):
+					editing_server_url = not editing_server_url
+					_play_sfx(600.0, 720.0, 0.08, 0)
 			else:
 				if start_btn_rect.has_point(mpos):
+					is_multiplayer = false
+					player2["active"] = false
 					_play_sfx(440.0, 880.0, 0.18, 0)
 					_begin_game_from_wave_1()
+				elif online_btn_rect.has_point(mpos):
+					online_lobby_open = true
+					btn_vel["online"] = 6.5
+					_play_sfx(440.0, 880.0, 0.14, 0)
+					_connect_to_signaling()
 				elif characters_btn_rect.has_point(mpos):
 					characters_open = true
 					viewing_character = selected_character
@@ -406,17 +859,66 @@ func _input(event: InputEvent) -> void:
 					btn_vel["credits"] = 6.5
 					_play_sfx(380.0, 620.0, 0.14, 0)
 		elif state == State.GAME_OVER:
-			if start_btn_rect.has_point(mpos):
+			if retry_btn_rect.has_point(mpos):
 				_play_sfx(440.0, 880.0, 0.18, 0)
-				_begin_game_from_wave_1()
-			elif credits_btn_rect.has_point(mpos):
+				if is_multiplayer and is_host:
+					_send_game_message({"action": "restart_game"})
+					_begin_game_from_wave_1()
+				elif is_multiplayer and not is_host:
+					_send_game_message({"action": "client_request_restart"})
+					_add_floating_text("WAITING FOR HOST TO RESTART...", Vector2(VIEW_W * 0.5, 300), Color("ffe762"))
+				else:
+					_begin_game_from_wave_1()
+			elif game_over_menu_btn_rect.has_point(mpos):
 				state = State.MENU
 				credits_open = false
 				characters_open = false
+				online_lobby_open = false
+				is_multiplayer = false
+				player2["active"] = false
 				_play_sfx(520.0, 320.0, 0.14, 0)
 
 	if event is InputEventKey and event.pressed and not event.echo:
-		if state == State.MENU and characters_open:
+		if state == State.MENU and online_lobby_open:
+			if editing_server_url:
+				if (event.ctrl_pressed or event.meta_pressed) and event.keycode == KEY_V:
+					var clip := DisplayServer.clipboard_get().strip_edges()
+					if clip.length() > 0:
+						signaling_server_url = _clean_url(clip)
+						_play_sfx(540.0, 720.0, 0.08, 0)
+				elif event.keycode in [KEY_ENTER, KEY_KP_ENTER]:
+					editing_server_url = false
+					signaling_server_url = _clean_url(signaling_server_url)
+					_connect_to_signaling()
+				elif event.keycode == KEY_ESCAPE:
+					editing_server_url = false
+				elif event.keycode == KEY_BACKSPACE:
+					if signaling_server_url.length() > 0:
+						signaling_server_url = signaling_server_url.substr(0, signaling_server_url.length() - 1)
+				elif event.unicode > 31 and event.unicode < 127:
+					signaling_server_url += char(event.unicode)
+			else:
+				if event.keycode >= KEY_A and event.keycode <= KEY_Z:
+					var char_str := OS.get_keycode_string(event.keycode).to_upper()
+					if join_code_input.length() < 4:
+						join_code_input += char_str
+						_play_sfx(620.0, 780.0, 0.05, 0)
+				elif event.keycode >= KEY_0 and event.keycode <= KEY_9:
+					var char_str := OS.get_keycode_string(event.keycode)
+					if join_code_input.length() < 4:
+						join_code_input += char_str
+						_play_sfx(620.0, 780.0, 0.05, 0)
+				elif event.keycode == KEY_BACKSPACE:
+					if join_code_input.length() > 0:
+						join_code_input = join_code_input.substr(0, join_code_input.length() - 1)
+						_play_sfx(440.0, 320.0, 0.05, 0)
+				elif event.keycode in [KEY_ENTER, KEY_KP_ENTER]:
+					if join_code_input.length() == 4:
+						_join_online_room()
+				elif event.keycode == KEY_ESCAPE:
+					online_lobby_open = false
+					_play_sfx(520.0, 260.0, 0.1, 0)
+		elif state == State.MENU and characters_open:
 			if event.keycode in [KEY_LEFT, KEY_A]:
 				viewing_character = (int(viewing_character) + 2) % 3 as Character
 				_play_sfx(540.0, 780.0, 0.1, 0)
@@ -432,12 +934,13 @@ func _input(event: InputEvent) -> void:
 				characters_open = false
 				_play_sfx(520.0, 260.0, 0.1, 0)
 		elif state == State.PLAYING:
-			if event.keycode == KEY_F:
-				_attempt_parry()
-			elif event.keycode in [KEY_SPACE, KEY_W, KEY_UP]:
-				_attempt_jump()
-			elif event.keycode == KEY_SHIFT:
-				_trigger_character_ability()
+			if not player.get("is_down", false):
+				if event.keycode == KEY_F:
+					_attempt_parry()
+				elif event.keycode in [KEY_SPACE, KEY_W, KEY_UP]:
+					_attempt_jump()
+				elif event.keycode == KEY_SHIFT:
+					_trigger_character_ability()
 
 func _trigger_character_ability() -> void:
 	match selected_character:
@@ -483,16 +986,25 @@ func _trigger_character_ability() -> void:
 func _begin_game_from_wave_1() -> void:
 	current_wave = 1
 	player["hearts"] = player["max_hearts"]
-	player["pos"] = Vector2(VIEW_W * 0.5, GROUND_Y)
+	player["pos"] = Vector2(VIEW_W * 0.4 if is_multiplayer else VIEW_W * 0.5, GROUND_Y)
 	player["vel"] = Vector2.ZERO
 	player["parry_active_timer"] = 0.0
 	player["parry_cooldown_timer"] = 0.0
 	player["invuln_timer"] = 0.0
+	player["is_down"] = false
+	if is_multiplayer:
+		player2["pos"] = Vector2(VIEW_W * 0.6, GROUND_Y)
+		player2["vel"] = Vector2.ZERO
+		player2["hearts"] = player2["max_hearts"]
+		player2["is_down"] = false
+		player2["parry_flash"] = 0.0
 	bandit_dash_cooldown = 0.0
 	bandit_dashing = false
 	scientist_freeze_cooldown = 0.0
 	time_freeze_timer = 0.0
 	nurse_regen_timer = NURSE_REGEN_INTERVAL
+	revive_timer = 0.0
+	p2_reviving_progress = 0.0
 	dash_ghosts.clear()
 	wind_particles.clear()
 	mobs.clear()
@@ -560,6 +1072,7 @@ func _physics_process(delta: float) -> void:
 	_fill_audio_buffers()
 	_update_dynamic_scenery(delta)
 	_update_menu_buttons(delta)
+	_update_networking(delta)
 	screen_shake = maxf(0.0, screen_shake - delta * 28.0)
 	grief_pulse_flash = maxf(0.0, grief_pulse_flash - delta * 1.8)
 
@@ -598,8 +1111,17 @@ func _update_playing_state(delta: float) -> void:
 
 	# Regular unfreezed updates
 	_update_player(delta)
-	_update_wave_spawner(delta)
-	_update_mobs(delta)
+	if is_multiplayer and player2["active"]:
+		player2["pos"] = player2["pos"].lerp(player2.get("target_pos", player2["pos"]), minf(1.0, 18.0 * delta))
+	if not is_multiplayer or is_host:
+		_update_wave_spawner(delta)
+		_update_mobs(delta)
+	else:
+		# Client-side smooth mob visuals & wing animations
+		for m in mobs:
+			m["anim"] = m.get("anim", 0.0) + delta * 3.0
+			if m.get("hit_flash", 0.0) > 0.0:
+				m["hit_flash"] = maxf(0.0, m["hit_flash"] - delta)
 	_update_lasers(delta)
 	_update_particles_and_text(delta)
 
@@ -643,19 +1165,34 @@ func _update_menu_buttons(delta: float) -> void:
 		return
 	var mpos: Vector2 = get_global_mouse_position()
 	var in_menu_or_over := (state in [State.MENU, State.GAME_OVER])
-	var modals_closed := not credits_open and not characters_open
+	var modals_closed := not credits_open and not characters_open and not online_lobby_open
 
-	var hover_start := in_menu_or_over and modals_closed and start_btn_rect.has_point(mpos)
+	var hover_start := in_menu_or_over and modals_closed and (start_btn_rect.has_point(mpos) if state == State.MENU else retry_btn_rect.has_point(mpos))
+	var hover_online := (state == State.MENU) and modals_closed and online_btn_rect.has_point(mpos)
 	var hover_chars := (state == State.MENU) and modals_closed and characters_btn_rect.has_point(mpos)
-	var hover_credits := in_menu_or_over and modals_closed and credits_btn_rect.has_point(mpos)
+	var hover_credits := in_menu_or_over and modals_closed and (credits_btn_rect.has_point(mpos) if state == State.MENU else game_over_menu_btn_rect.has_point(mpos))
 	var hover_close := (state == State.MENU) and credits_open and (mpos.distance_to(close_credits_center) <= CLOSE_BTN_RADIUS + 4.0)
 	var hover_char_close := (state == State.MENU) and characters_open and (mpos.distance_to(close_char_center) <= CLOSE_BTN_RADIUS + 4.0)
+	var hover_online_close := (state == State.MENU) and online_lobby_open and (mpos.distance_to(close_online_center) <= CLOSE_BTN_RADIUS + 4.0)
 
 	_apply_spring_button("start", hover_start, delta)
+	_apply_spring_button("online", hover_online, delta)
 	_apply_spring_button("characters", hover_chars, delta)
 	_apply_spring_button("credits", hover_credits, delta)
 	_apply_spring_button("close", hover_close, delta)
 	_apply_spring_button("char_close", hover_char_close, delta)
+	_apply_spring_button("online_close", hover_online_close, delta)
+
+	# Online lobby buttons
+	if state == State.MENU and online_lobby_open:
+		var hover_create := host_create_btn_rect.has_point(mpos)
+		var hover_host_start := host_start_btn_rect.has_point(mpos) and peer_is_ready
+		var hover_join := join_enter_btn_rect.has_point(mpos) and join_code_input.length() == 4
+		var hover_server := server_url_bar_rect.has_point(mpos)
+		_apply_spring_button("host_create", hover_create, delta)
+		_apply_spring_button("host_start", hover_host_start, delta)
+		_apply_spring_button("join_btn", hover_join, delta)
+		_apply_spring_button("edit_server", hover_server, delta)
 
 	# Character selection tabs and activate button spring animations
 	if state == State.MENU and characters_open:
@@ -728,6 +1265,8 @@ func _attempt_parry() -> void:
 	player["parry_cooldown_timer"] = PARRY_COOLDOWN
 	player["parry_flash"] = 0.18
 	_play_sfx(520.0, 960.0, 0.08, 0)
+	if is_multiplayer:
+		_send_game_message({"action": "player_parry"})
 	_check_parry_deflection()
 
 func _check_parry_deflection() -> void:
@@ -759,6 +1298,8 @@ func _check_parry_deflection() -> void:
 				_play_sfx(680.0, 1480.0, 0.16, 0)
 				_spawn_burst(l["pos"], Color("73eff7"), 18, 260.0)
 				_add_floating_text("PERFECT PARRY!", p_center + Vector2(0, -34), Color("73eff7"))
+				if is_multiplayer and not is_host:
+					_send_game_message({"action": "client_deflect", "pos_x": p_center.x, "pos_y": p_center.y})
 
 func _update_player(delta: float) -> void:
 	player["parry_active_timer"] = maxf(0.0, player["parry_active_timer"] - delta)
@@ -805,10 +1346,17 @@ func _update_player(delta: float) -> void:
 			bandit_dashing = false
 	else:
 		var dir := 0.0
-		if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-			dir -= 1.0
-		if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-			dir += 1.0
+		if not player.get("is_down", false):
+			if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+				dir -= 1.0
+			if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+				dir += 1.0
+		else:
+			# Downed crawl
+			if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+				dir -= 0.35
+			if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+				dir += 0.35
 
 		if dir != 0.0:
 			player["facing"] = int(sign(dir))
@@ -840,6 +1388,38 @@ func _update_player(delta: float) -> void:
 			player["on_ground"] = true
 
 	player["pos"].x = clampf(player["pos"].x, 28.0, VIEW_W - 28.0)
+
+	# Co-op Revive Mechanic
+	if is_multiplayer:
+		# If local player is downed:
+		if player.get("is_down", false) and player2["active"] and not player2.get("is_down", false):
+			if player["pos"].distance_to(player2["pos"]) <= 75.0:
+				revive_timer += delta
+				if revive_timer >= 2.0:
+					player["is_down"] = false
+					player["hearts"] = 2
+					revive_timer = 0.0
+					_send_game_message({"action": "revived", "player_id": 1 if is_host else 2})
+					_play_heal_sfx()
+					_spawn_burst(player["pos"], Color("55ff99"), 24, 200.0)
+					_add_floating_text("REVIVED BY TEAMMATE!", player["pos"] - Vector2(0, 48), Color("55ff99"))
+			else:
+				revive_timer = maxf(0.0, revive_timer - delta * 0.5)
+
+		# If teammate is downed and local player is standing close:
+		if not player.get("is_down", false) and player2["active"] and player2.get("is_down", false):
+			if player["pos"].distance_to(player2["pos"]) <= 75.0:
+				p2_reviving_progress += delta
+				if p2_reviving_progress >= 2.0:
+					player2["is_down"] = false
+					player2["hearts"] = 2
+					p2_reviving_progress = 0.0
+					_send_game_message({"action": "revived", "player_id": 2 if is_host else 1})
+					_play_heal_sfx()
+					_spawn_burst(player2["pos"], Color("55ff99"), 24, 200.0)
+					_add_floating_text("YOU REVIVED TEAMMATE!", player2["pos"] - Vector2(0, 48), Color("55ff99"))
+			else:
+				p2_reviving_progress = maxf(0.0, p2_reviving_progress - delta * 0.8)
 
 	# Update dash ghosts
 	for i in range(dash_ghosts.size() - 1, -1, -1):
@@ -1121,14 +1701,20 @@ func _update_lasers(delta: float) -> void:
 			# Hitbox collision with player body
 			var p_rect: Rect2 = Rect2(player["pos"].x - player["w"] * 0.45, player["pos"].y - player["h"], player["w"] * 0.9, player["h"])
 			if p_rect.grow(3.0).has_point(l["pos"]):
-				# If player is dashing or invulnerable, hitbox negation protects them!
-				if bandit_dashing or player["invuln_timer"] > 0.0:
-					# Pass right through harmlessly with a spark
+				if bandit_dashing or player["invuln_timer"] > 0.0 or player.get("is_down", false):
 					_spawn_burst(l["pos"], Color("38ffff"), 4, 80.0)
 					continue
 				lasers.remove_at(i)
 				_damage_player()
 				continue
+
+			# Hitbox collision with player 2 in multiplayer (computed by host)
+			if is_multiplayer and is_host and player2["active"] and not player2.get("is_down", false):
+				var p2_rect: Rect2 = Rect2(player2["pos"].x - player["w"] * 0.45, player2["pos"].y - player["h"], player["w"] * 0.9, player["h"])
+				if p2_rect.grow(3.0).has_point(l["pos"]):
+					lasers.remove_at(i)
+					_send_game_message({"action": "player2_hit"})
+					continue
 
 			# Laser hits ground
 			if l["pos"].y >= GROUND_Y:
@@ -1167,8 +1753,18 @@ func _damage_player() -> void:
 	_add_floating_text("-1 HEART!", player["pos"] - Vector2(0, 46), Color("ff4b6b"))
 
 	if player["hearts"] <= 0:
-		state = State.GAME_OVER
-		_play_sfx(140.0, 50.0, 0.55, 1)
+		if is_multiplayer:
+			player["is_down"] = true
+			player["hearts"] = 0
+			_add_floating_text("DOWNED! NEED REVIVE!", player["pos"] - Vector2(0, 46), Color("ff2a4b"))
+			_send_game_message({"action": "player_down", "player_id": 1 if is_host else 2})
+			if player2.get("is_down", false):
+				state = State.GAME_OVER
+				_play_sfx(140.0, 50.0, 0.55, 1)
+				_send_game_message({"action": "game_over"})
+		else:
+			state = State.GAME_OVER
+			_play_sfx(140.0, 50.0, 0.55, 1)
 
 # ==============================================================================
 # PARTICLES & FLOATING TEXT
@@ -1236,6 +1832,8 @@ func _draw() -> void:
 	if state in [State.PLAYING, State.TRANSITION, State.GAME_OVER]:
 		_draw_dash_ghosts()
 		_draw_player()
+		if is_multiplayer and player2["active"]:
+			_draw_remote_player()
 		_draw_mobs()
 		_draw_lasers()
 		_draw_particles_and_texts()
@@ -1422,6 +2020,18 @@ func _draw_player() -> void:
 		draw_circle(p_center, 90.0 * (1.0 + sin(Time.get_ticks_msec() * 0.02) * 0.1), Color(0.25, 0.85, 1.0, 0.14))
 		draw_arc(p_center, 78.0, 0.0, TAU, 32, Color(0.4, 0.95, 1.0, 0.6), 2.5)
 
+	if is_multiplayer and player.get("is_down", false):
+		var font := ThemeDB.fallback_font
+		draw_circle(p - Vector2(0, 10), 22.0, Color(0.12, 0.02, 0.05, 0.6))
+		draw_arc(p - Vector2(0, 10), 32.0, 0.0, TAU, 28, Color("ff2a55", 0.8), 2.5)
+		if revive_timer > 0.0:
+			var ratio: float = clampf(revive_timer / 2.0, 0.0, 1.0)
+			draw_arc(p - Vector2(0, 10), 38.0, -PI * 0.5, -PI * 0.5 + ratio * TAU, 36, Color("55ff99"), 4.0)
+			draw_string(font, p + Vector2(-60, -56), "REVIVING... %.0f%%" % (ratio * 100.0), HORIZONTAL_ALIGNMENT_CENTER, 120, 11, Color("55ff99"))
+		else:
+			draw_string_outline(font, p + Vector2(-75, -50), "⚠ DOWNED! CALL TEAMMATE", HORIZONTAL_ALIGNMENT_CENTER, 150, 11, 2, Color.BLACK)
+			draw_string(font, p + Vector2(-75, -50), "⚠ DOWNED! CALL TEAMMATE", HORIZONTAL_ALIGNMENT_CENTER, 150, 11, Color("ff3b5b"))
+
 	if flash:
 		return
 
@@ -1434,6 +2044,55 @@ func _draw_player() -> void:
 			_draw_scientist_sprite(p, facing, leg_swing)
 		Character.NURSE:
 			_draw_nurse_sprite(p, facing, leg_swing)
+
+	if is_multiplayer and not player.get("is_down", false):
+		var font := ThemeDB.fallback_font
+		var p1_name: String = "P1 (YOU)"
+		var tag_rect := Rect2(p.x - 36, p.y - 58, 72, 18)
+		_draw_rounded_box(tag_rect, 5.0, Color("101626", 0.85), Color("41f3ff"), 1.0)
+		draw_string(font, Vector2(tag_rect.position.x, tag_rect.position.y + 13), p1_name, HORIZONTAL_ALIGNMENT_CENTER, 72, 10, Color("41f3ff"))
+
+func _draw_remote_player() -> void:
+	var p2: Vector2 = player2["pos"]
+	var facing: int = player2["facing"]
+	var font := ThemeDB.fallback_font
+
+	if player2["parry_flash"] > 0.0:
+		var p2_center := p2 - Vector2(0, 18.0)
+		draw_arc(p2_center, PARRY_RADIUS * 0.75, 0.0, TAU, 36, Color("73eff7", 0.7), 3.5)
+		draw_circle(p2_center, PARRY_RADIUS * 0.55, Color("73eff7", 0.2))
+
+	if player2.get("is_down", false):
+		draw_circle(p2 - Vector2(0, 10), 22.0, Color(0.12, 0.02, 0.05, 0.6))
+		draw_arc(p2 - Vector2(0, 10), 32.0, 0.0, TAU, 28, Color("ff2a55", 0.8), 2.5)
+
+		if p2_reviving_progress > 0.0:
+			var ratio: float = clampf(p2_reviving_progress / 2.0, 0.0, 1.0)
+			draw_arc(p2 - Vector2(0, 10), 38.0, -PI * 0.5, -PI * 0.5 + ratio * TAU, 36, Color("55ff99"), 4.0)
+			draw_string(font, p2 + Vector2(-60, -56), "REVIVING... %.0f%%" % (ratio * 100.0), HORIZONTAL_ALIGNMENT_CENTER, 120, 11, Color("55ff99"))
+		else:
+			draw_string_outline(font, p2 + Vector2(-75, -50), "⚠ DOWNED! STAND NEAR", HORIZONTAL_ALIGNMENT_CENTER, 150, 11, 2, Color.BLACK)
+			draw_string(font, p2 + Vector2(-75, -50), "⚠ DOWNED! STAND NEAR", HORIZONTAL_ALIGNMENT_CENTER, 150, 11, Color("ff3b5b"))
+
+		draw_set_transform(p2, 0.45 * facing, Vector2.ONE)
+		_draw_bandit_sprite(Vector2.ZERO, facing, 0.0)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		return
+
+	var leg_swing: float = sin(player2["walk_anim"]) * 5.0
+	match int(player2["character"]):
+		Character.BANDIT:
+			_draw_bandit_sprite(p2, facing, leg_swing)
+		Character.SCIENTIST:
+			_draw_scientist_sprite(p2, facing, leg_swing)
+		Character.NURSE:
+			_draw_nurse_sprite(p2, facing, leg_swing)
+
+	var p2_name: String = "P2 • " + _get_character_name(player2["character"])
+	var tag_w: float = 88.0
+	var tag_rect := Rect2(p2.x - tag_w * 0.5, p2.y - 58, tag_w, 18)
+	_draw_rounded_box(tag_rect, 5.0, Color("101626", 0.85), Color("ffe762"), 1.0)
+	draw_string(font, Vector2(tag_rect.position.x, tag_rect.position.y + 13), p2_name, HORIZONTAL_ALIGNMENT_CENTER, tag_w, 10, Color("ffe762"))
 
 func _draw_bandit_sprite(p: Vector2, facing: int, leg_swing: float) -> void:
 	# Bandit (Outlaw Rogue: Dark Cowl, Outlaw Brim, Crimson Mask, Leather Bandolier & Loot Purse)
@@ -1693,16 +2352,43 @@ func _draw_particles_and_texts() -> void:
 # HUD (Hearts, Wave, Ability Indicators & Boss Health Bar)
 # ==============================================================================
 func _draw_hud() -> void:
-	# Terraria-style Hearts top-left
-	for i in range(player["max_hearts"]):
-		var hx: float = 38.0 + i * 38.0
-		var hy: float = 36.0
-		var filled: bool = (i < player["hearts"])
-		_draw_heart_icon(Vector2(hx, hy), 14.0, filled)
-
 	var font := ThemeDB.fallback_font
-	draw_string_outline(font, Vector2(28, 76), "WAVE %d   |   MOBS LEFT: %d" % [current_wave, mobs.size() + mobs_to_spawn], HORIZONTAL_ALIGNMENT_LEFT, -1, 20, 4, Color.BLACK)
-	draw_string(font, Vector2(28, 76), "WAVE %d   |   MOBS LEFT: %d" % [current_wave, mobs.size() + mobs_to_spawn], HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color("ffe762"))
+	if not is_multiplayer:
+		# Terraria-style Hearts top-left
+		for i in range(player["max_hearts"]):
+			var hx: float = 38.0 + i * 38.0
+			var hy: float = 36.0
+			var filled: bool = (i < player["hearts"])
+			_draw_heart_icon(Vector2(hx, hy), 14.0, filled)
+	else:
+		# Dual Co-Op HUD
+		# P1 Hearts & Label
+		var p1_label: String = "P1 (YOU) • " + _get_character_name(selected_character)
+		if player.get("is_down", false):
+			p1_label += " [⚠ DOWNED!]"
+		draw_string_outline(font, Vector2(28, 26), p1_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, 3, Color.BLACK)
+		draw_string(font, Vector2(28, 26), p1_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("41f3ff") if not player.get("is_down", false) else Color("ff3b5b"))
+		for i in range(player["max_hearts"]):
+			var hx: float = 38.0 + i * 28.0
+			var hy: float = 48.0
+			var filled: bool = (i < player["hearts"])
+			_draw_heart_icon(Vector2(hx, hy), 11.0, filled)
+
+		# P2 Hearts & Label (Top Right)
+		var p2_label: String = "P2 (FRIEND) • " + _get_character_name(player2["character"])
+		if player2.get("is_down", false):
+			p2_label += " [⚠ DOWNED!]"
+		draw_string_outline(font, Vector2(VIEW_W - 240, 26), p2_label, HORIZONTAL_ALIGNMENT_RIGHT, 210, 14, 3, Color.BLACK)
+		draw_string(font, Vector2(VIEW_W - 240, 26), p2_label, HORIZONTAL_ALIGNMENT_RIGHT, 210, 14, Color("ffe762") if not player2.get("is_down", false) else Color("ff3b5b"))
+		for i in range(player2["max_hearts"]):
+			var hx: float = (VIEW_W - 170.0) + i * 28.0
+			var hy: float = 48.0
+			var filled: bool = (i < player2["hearts"])
+			_draw_heart_icon(Vector2(hx, hy), 11.0, filled)
+
+	var hud_y: float = 76.0 if not is_multiplayer else 86.0
+	draw_string_outline(font, Vector2(28, hud_y), "WAVE %d   |   MOBS LEFT: %d" % [current_wave, mobs.size() + mobs_to_spawn], HORIZONTAL_ALIGNMENT_LEFT, -1, 20, 4, Color.BLACK)
+	draw_string(font, Vector2(28, hud_y), "WAVE %d   |   MOBS LEFT: %d" % [current_wave, mobs.size() + mobs_to_spawn], HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color("ffe762"))
 
 	var parry_status: String = "PARRY [F]: READY" if player["parry_cooldown_timer"] <= 0.0 else "PARRY [F]: RECHARGING"
 	var parry_col: Color = Color("73eff7") if player["parry_cooldown_timer"] <= 0.0 else Color("ff6b6b")
@@ -1733,8 +2419,8 @@ func _draw_hud() -> void:
 				ability_status = "PASSIVE REGEN: FULL HP"
 				ability_col = Color("55ff99")
 
-	draw_string_outline(font, Vector2(28, 102), parry_status + "   |   " + ability_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, 3, Color.BLACK)
-	draw_string(font, Vector2(28, 102), parry_status + "   |   " + ability_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, ability_col)
+	draw_string_outline(font, Vector2(28, hud_y + 26.0), parry_status + "   |   " + ability_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, 3, Color.BLACK)
+	draw_string(font, Vector2(28, hud_y + 26.0), parry_status + "   |   " + ability_status, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, ability_col)
 
 	# WAVE 5: EXTREME BOSS HEALTH BAR
 	if current_wave == 5:
@@ -1742,6 +2428,13 @@ func _draw_hud() -> void:
 			if m.get("is_boss", false):
 				_draw_boss_health_bar(m)
 				break
+
+func _get_character_name(c: int) -> String:
+	match c:
+		Character.BANDIT: return "BANDIT"
+		Character.SCIENTIST: return "SCIENTIST"
+		Character.NURSE: return "NURSE"
+	return "FIGHTER"
 
 func _draw_boss_health_bar(boss: Dictionary) -> void:
 	var bar_w := 540.0
@@ -1850,12 +2543,15 @@ func _draw_main_menu() -> void:
 	draw_string_outline(font, Vector2(0, 245), "PERFECT PARRY [F] | SHIFT FOR CHARACTER ABILITIES", HORIZONTAL_ALIGNMENT_CENTER, VIEW_W, 19, 4, Color.BLACK)
 	draw_string(font, Vector2(0, 245), "PERFECT PARRY [F] | SHIFT FOR CHARACTER ABILITIES", HORIZONTAL_ALIGNMENT_CENTER, VIEW_W, 19, Color("ffe762"))
 
-	# 3 Menu Buttons (START, CHARACTERS, CREDITS)
-	_draw_bouncy_button(start_btn_rect, btn_scales["start"], Color("ff5e7e"), Color("ff9e2c"), "START", 30)
-	_draw_bouncy_button(characters_btn_rect, btn_scales["characters"], Color("3b6cd9"), Color("41f3ff"), "CHARACTERS", 28)
-	_draw_bouncy_button(credits_btn_rect, btn_scales["credits"], Color("38b764"), Color("41f3ff"), "CREDITS", 28)
+	# 4 Menu Buttons (SOLO MISSION, ONLINE CO-OP, CHARACTERS, CREDITS)
+	_draw_bouncy_button(start_btn_rect, btn_scales["start"], Color("ff5e7e"), Color("ff9e2c"), "SOLO MISSION", 28)
+	_draw_bouncy_button(online_btn_rect, btn_scales["online"], Color("1b499c"), Color("41f3ff"), "ONLINE CO-OP", 28)
+	_draw_bouncy_button(characters_btn_rect, btn_scales["characters"], Color("3b6cd9"), Color("41f3ff"), "CHARACTERS", 26)
+	_draw_bouncy_button(credits_btn_rect, btn_scales["credits"], Color("38b764"), Color("41f3ff"), "CREDITS", 26)
 
-	if characters_open:
+	if online_lobby_open:
+		_draw_online_lobby_modal()
+	elif characters_open:
 		_draw_characters_modal()
 	elif credits_open:
 		_draw_credits_modal()
@@ -2214,8 +2910,8 @@ func _draw_game_over_overlay() -> void:
 
 	draw_string(font, Vector2(0, 280), "PRESS TO RESTART", HORIZONTAL_ALIGNMENT_CENTER, VIEW_W, 14, Color("cbd5e0"))
 
-	_draw_bouncy_button(start_btn_rect, btn_scales["start"], Color("ff5e7e"), Color("ff9e2c"), "BOUNCE BACK", 28)
-	_draw_bouncy_button(credits_btn_rect, btn_scales["credits"], Color("3b5dc9"), Color("41f3ff"), "MAIN MENU", 28)
+	_draw_bouncy_button(retry_btn_rect, btn_scales["start"], Color("ff5e7e"), Color("ff9e2c"), "BOUNCE BACK", 28)
+	_draw_bouncy_button(game_over_menu_btn_rect, btn_scales["credits"], Color("3b5dc9"), Color("41f3ff"), "MAIN MENU", 28)
 
 func _draw_bouncy_button(rect: Rect2, scale_val: float, fill_col: Color, border_col: Color, label: String, font_size: int) -> void:
 	var center := rect.get_center()
@@ -2231,6 +2927,125 @@ func _draw_bouncy_button(rect: Rect2, scale_val: float, fill_col: Color, border_
 	var text_y: float = center.y + font_size * 0.36
 	draw_string_outline(font, Vector2(s_rect.position.x, text_y), label, HORIZONTAL_ALIGNMENT_CENTER, s_rect.size.x, font_size, 5, Color("141018"))
 	draw_string(font, Vector2(s_rect.position.x, text_y), label, HORIZONTAL_ALIGNMENT_CENTER, s_rect.size.x, font_size, Color.WHITE)
+
+func _draw_online_lobby_modal() -> void:
+	draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), Color(0.04, 0.06, 0.12, 0.88))
+	_draw_rounded_box(Rect2(online_box_rect.position + Vector2(0, 10), online_box_rect.size), 22.0, Color(0, 0, 0, 0.6), Color.TRANSPARENT, 0.0)
+	_draw_rounded_box(online_box_rect, 22.0, Color("101626"), Color("41f3ff"), 3.5)
+
+	var font := ThemeDB.fallback_font
+	draw_string_outline(font, Vector2(online_box_rect.position.x, online_box_rect.position.y + 34), "ONLINE CO-OP MULTIPLAYER", HORIZONTAL_ALIGNMENT_CENTER, online_box_rect.size.x, 26, 5, Color.BLACK)
+	draw_string(font, Vector2(online_box_rect.position.x, online_box_rect.position.y + 34), "ONLINE CO-OP MULTIPLAYER", HORIZONTAL_ALIGNMENT_CENTER, online_box_rect.size.x, 26, Color("ffe762"))
+
+	draw_string_outline(font, Vector2(online_box_rect.position.x, online_box_rect.position.y + 54), "PLAY TOGETHER ON ITCH.IO • 4-LETTER ROOM CODES • WEBRTC P2P", HORIZONTAL_ALIGNMENT_CENTER, online_box_rect.size.x, 12, 3, Color.BLACK)
+	draw_string(font, Vector2(online_box_rect.position.x, online_box_rect.position.y + 54), "PLAY TOGETHER ON ITCH.IO • 4-LETTER ROOM CODES • WEBRTC P2P", HORIZONTAL_ALIGNMENT_CENTER, online_box_rect.size.x, 12, Color("41f3ff"))
+
+	# Close button ('X' at top right)
+	var r: float = CLOSE_BTN_RADIUS * btn_scales["online_close"]
+	draw_circle(close_online_center + Vector2(0, 3), r + 2.0, Color(0, 0, 0, 0.45))
+	draw_circle(close_online_center, r, Color("ff2a4b"))
+	draw_arc(close_online_center, r, 0.0, TAU, 28, Color.WHITE, 2.5)
+	var x_off: float = r * 0.42
+	draw_line(close_online_center + Vector2(-x_off, -x_off), close_online_center + Vector2(x_off, x_off), Color.WHITE, 3.0)
+	draw_line(close_online_center + Vector2(x_off, -x_off), close_online_center + Vector2(-x_off, x_off), Color.WHITE, 3.0)
+
+	# --- 1. LEFT CARD: HOST ROOM ---
+	_draw_rounded_box(Rect2(host_card_rect.position + Vector2(0, 6), host_card_rect.size), 16.0, Color(0, 0, 0, 0.4), Color.TRANSPARENT, 0.0)
+	_draw_rounded_box(host_card_rect, 16.0, Color("141c2c"), Color("41f3ff") if is_host else Color("2a3c57"), 2.0)
+
+	draw_string_outline(font, Vector2(host_card_rect.position.x, host_card_rect.position.y + 36), "⚔ HOST A CO-OP ROOM", HORIZONTAL_ALIGNMENT_CENTER, host_card_rect.size.x, 20, 4, Color.BLACK)
+	draw_string(font, Vector2(host_card_rect.position.x, host_card_rect.position.y + 36), "⚔ HOST A CO-OP ROOM", HORIZONTAL_ALIGNMENT_CENTER, host_card_rect.size.x, 20, Color("41f3ff"))
+
+	draw_string(font, Vector2(host_card_rect.position.x, host_card_rect.position.y + 58), "Create a room and share the 4-letter code", HORIZONTAL_ALIGNMENT_CENTER, host_card_rect.size.x, 11, Color("94a3b8"))
+
+	# Big Room Code Display Box
+	var code_display_rect := Rect2(host_card_rect.position.x + 36, host_card_rect.position.y + 85, host_card_rect.size.x - 72, 86)
+	_draw_rounded_box(code_display_rect, 12.0, Color("0b101c"), Color("ffe762") if my_room_code != "" and is_host else Color("223147"), 2.0)
+	if my_room_code != "" and is_host:
+		var letters := ""
+		for idx in range(my_room_code.length()):
+			letters += my_room_code[idx] + "   "
+		draw_string_outline(font, Vector2(code_display_rect.position.x, code_display_rect.position.y + 52), letters.strip_edges(), HORIZONTAL_ALIGNMENT_CENTER, code_display_rect.size.x, 36, 5, Color.BLACK)
+		draw_string(font, Vector2(code_display_rect.position.x, code_display_rect.position.y + 52), letters.strip_edges(), HORIZONTAL_ALIGNMENT_CENTER, code_display_rect.size.x, 36, Color("ffe762"))
+		draw_string(font, Vector2(code_display_rect.position.x, code_display_rect.position.y + 74), "SHARE THIS 4-LETTER CODE", HORIZONTAL_ALIGNMENT_CENTER, code_display_rect.size.x, 10, Color("55ff99"))
+	else:
+		draw_string(font, Vector2(code_display_rect.position.x, code_display_rect.position.y + 48), "NO ROOM CREATED YET", HORIZONTAL_ALIGNMENT_CENTER, code_display_rect.size.x, 14, Color("64748b"))
+		draw_string(font, Vector2(code_display_rect.position.x, code_display_rect.position.y + 68), "Click 'Create Room' below", HORIZONTAL_ALIGNMENT_CENTER, code_display_rect.size.x, 10, Color("475569"))
+
+	# Host Status Pill
+	var host_pill_rect := Rect2(host_card_rect.position.x + 36, host_card_rect.position.y + 190, host_card_rect.size.x - 72, 38)
+	var peer_col: Color = Color("55ff99") if peer_is_ready else (Color("ffe762") if my_room_code != "" and is_host else Color("64748b"))
+	var peer_text: String = "● FRIEND CONNECTED! READY!" if peer_is_ready else ("● WAITING FOR FRIEND TO JOIN..." if my_room_code != "" and is_host else "● READY TO CREATE")
+	_draw_rounded_box(host_pill_rect, 8.0, Color("0f172a"), peer_col, 1.2)
+	draw_string(font, Vector2(host_pill_rect.position.x, host_pill_rect.position.y + 24), peer_text, HORIZONTAL_ALIGNMENT_CENTER, host_pill_rect.size.x, 12, peer_col)
+
+	# [CREATE ROOM] Button
+	_draw_bouncy_button(host_create_btn_rect, btn_scales["host_create"], Color("2563eb"), Color("60a5fa"), "CREATE ROOM", 18)
+
+	# [START CO-OP GAME] Button
+	var start_fill: Color = Color("059669") if peer_is_ready else Color("1e293b")
+	var start_brd: Color = Color("34d399") if peer_is_ready else Color("475569")
+	var start_label: String = "START CO-OP MISSION" if peer_is_ready else "WAITING FOR FRIEND..."
+	_draw_bouncy_button(host_start_btn_rect, btn_scales["host_start"], start_fill, start_brd, start_label, 18)
+
+	# --- 2. RIGHT CARD: JOIN ROOM ---
+	_draw_rounded_box(Rect2(join_card_rect.position + Vector2(0, 6), join_card_rect.size), 16.0, Color(0, 0, 0, 0.4), Color.TRANSPARENT, 0.0)
+	_draw_rounded_box(join_card_rect, 16.0, Color("141c2c"), Color("ffe762") if not is_host and my_room_code != "" else Color("2a3c57"), 2.0)
+
+	draw_string_outline(font, Vector2(join_card_rect.position.x, join_card_rect.position.y + 36), "🔗 JOIN FRIEND'S ROOM", HORIZONTAL_ALIGNMENT_CENTER, join_card_rect.size.x, 20, 4, Color.BLACK)
+	draw_string(font, Vector2(join_card_rect.position.x, join_card_rect.position.y + 36), "🔗 JOIN FRIEND'S ROOM", HORIZONTAL_ALIGNMENT_CENTER, join_card_rect.size.x, 20, Color("ffe762"))
+
+	draw_string(font, Vector2(join_card_rect.position.x, join_card_rect.position.y + 58), "Type your friend's 4-letter room code", HORIZONTAL_ALIGNMENT_CENTER, join_card_rect.size.x, 11, Color("94a3b8"))
+
+	# 4 Big Letter Input Slots
+	var slot_w: float = 64.0
+	var slot_h: float = 78.0
+	var slot_gap: float = 16.0
+	var total_slot_w: float = 4.0 * slot_w + 3.0 * slot_gap
+	var slot_start_x: float = join_card_rect.get_center().x - total_slot_w * 0.5
+	var slot_y: float = join_card_rect.position.y + 90.0
+
+	for i in range(4):
+		var sx: float = slot_start_x + i * (slot_w + slot_gap)
+		var s_box := Rect2(sx, slot_y, slot_w, slot_h)
+		var has_char: bool = (join_code_input.length() > i)
+		var is_cur: bool = (join_code_input.length() == i)
+		var box_brd: Color = Color("41f3ff") if is_cur else (Color("ffe762") if has_char else Color("334155"))
+		_draw_rounded_box(s_box, 10.0, Color("0b101c"), box_brd, 2.0 if (has_char or is_cur) else 1.2)
+
+		if has_char:
+			var ch: String = join_code_input.substr(i, 1)
+			draw_string_outline(font, Vector2(sx, slot_y + 52), ch, HORIZONTAL_ALIGNMENT_CENTER, slot_w, 36, 4, Color.BLACK)
+			draw_string(font, Vector2(sx, slot_y + 52), ch, HORIZONTAL_ALIGNMENT_CENTER, slot_w, 36, Color("ffe762"))
+		elif is_cur:
+			var blink: float = sin(Time.get_ticks_msec() * 0.008) * 0.5 + 0.5
+			if blink > 0.35:
+				draw_rect(Rect2(sx + slot_w * 0.25, slot_y + slot_h - 14, slot_w * 0.5, 4), Color("41f3ff"))
+
+	draw_string(font, Vector2(join_card_rect.position.x, slot_y + slot_h + 20), "CLICK ANYWHERE & TYPE LETTERS (A-Z) ON KEYBOARD", HORIZONTAL_ALIGNMENT_CENTER, join_card_rect.size.x, 10, Color("94a3b8"))
+
+	# Join Status Pill
+	var join_pill_rect := Rect2(join_card_rect.position.x + 36, join_card_rect.position.y + 225, join_card_rect.size.x - 72, 38)
+	var j_col: Color = Color("55ff99") if not is_host and my_room_code != "" else Color("64748b")
+	var j_text: String = "● CONNECTED TO HOST! READY!" if not is_host and my_room_code != "" else "● ENTER 4 LETTERS & CLICK JOIN"
+	_draw_rounded_box(join_pill_rect, 8.0, Color("0f172a"), j_col, 1.2)
+	draw_string(font, Vector2(join_pill_rect.position.x, join_pill_rect.position.y + 24), j_text, HORIZONTAL_ALIGNMENT_CENTER, join_pill_rect.size.x, 12, j_col)
+
+	# [JOIN ROOM] Button
+	var can_join: bool = (join_code_input.length() == 4)
+	var join_fill: Color = Color("7c3aed") if can_join else Color("1e293b")
+	var join_brd: Color = Color("a78bfa") if can_join else Color("475569")
+	_draw_bouncy_button(join_enter_btn_rect, btn_scales["join_btn"], join_fill, join_brd, "JOIN ROOM", 18)
+
+	# --- 3. BOTTOM BAR: SERVER CONFIGURATION & STATUS ---
+	_draw_rounded_box(server_url_bar_rect, 10.0, Color("0b101c"), Color("38ffff") if editing_server_url else Color("1e293b"), 1.8)
+	var dot_col: Color = Color("55ff99") if (ws_client != null and ws_client.get_ready_state() == WebSocketPeer.STATE_OPEN) else Color("ef4444")
+	draw_circle(Vector2(server_url_bar_rect.position.x + 18, server_url_bar_rect.get_center().y), 5.0, dot_col)
+
+	var svr_text: String = "SERVER: " + signaling_server_url + (" [EDITING... PASTE: CTRL+V | ENTER]" if editing_server_url else " (CLICK TO EDIT)")
+	draw_string(font, Vector2(server_url_bar_rect.position.x + 34, server_url_bar_rect.get_center().y + 5), svr_text, HORIZONTAL_ALIGNMENT_LEFT, 540, 11, Color("e2e8f0"))
+
+	draw_string(font, Vector2(server_url_bar_rect.end.x - 340, server_url_bar_rect.get_center().y + 5), "STATUS: " + online_status, HORIZONTAL_ALIGNMENT_RIGHT, 320, 11, dot_col)
 
 func _draw_credits_modal() -> void:
 	draw_rect(Rect2(0, 0, VIEW_W, VIEW_H), Color(0, 0, 0, 0.65))
